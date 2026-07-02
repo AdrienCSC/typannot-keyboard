@@ -1,10 +1,16 @@
 /* ============================================================
-   TYPANNOT — MOTEUR (page finger) — v2 (lot B inclus)
+   TYPANNOT — MOTEUR (page finger) — v3
    Hébergé en externe (jsDelivr / GitHub).
    Dépend de window.GROUPS (bloc CSV) et du miroir (#input-mirror).
    Démarre sur 'groups-ready'. Debug console : window.typannotJournal()
-   Lot B : undefined vide le bloc ; cascade AS/hand -> tous les doigts ;
-           bouton copier la formule complète (haut-droite de la formule).
+
+   v2 : undefined vide le bloc (clic) ; cascade AS/hand -> tous les doigts ;
+        bouton copier la formule complète.
+   v3 : undefined = contenu VALIDE (plus de rouge injustifié au clavier),
+        mais une VRAIE value exige une VRAIE subvar (undefined ne suffit pas) ;
+        clic undefined nettoie les ancres devenues orphelines ;
+        bouton copier-formule utilise l'image copy du site.
+   Redo : le moteur se branche sur .redo-key (à créer dans Webflow).
    ============================================================ */
 
 
@@ -111,7 +117,7 @@ function startTypannotEngine(){
   function validate(glyphs, caseIds){
     caseIds = caseIds || [];
     // état frais : pour chaque case, {filled, glyph, typed}
-    const st = CASES.map(c => ({filled:false, glyph:c.fixedGlyph, typed:false, srcChar:-1}));
+    const st = CASES.map(c => ({filled:false, glyph:c.fixedGlyph, typed:false, srcChar:-1, isUndef:false}));
     let cursor = -1;
     const errors = [];
 
@@ -123,6 +129,22 @@ function startTypannotEngine(){
       } else {
         return c.fixedGlyph === glyph;
       }
+    }
+    // matche AUSSI l'option undefined (undefined est un contenu valide de la case)
+    function gMatchUndef(glyph, i){
+      const c = CASES[i];
+      if(isInteractive(c)){
+        const opts = GROUPS[c.dataOptions]||[];
+        return opts.some(o=>o.glyph===glyph);
+      }
+      return false;
+    }
+    // ce glyphe est-il l'undefined d'un groupe interactif ?
+    function isUndefGlyph(glyph, i){
+      const c = CASES[i];
+      if(!isInteractive(c)) return false;
+      const opts = GROUPS[c.dataOptions]||[];
+      return opts.some(o=>o.glyph===glyph && o.label==='undefined');
     }
     // kind d'un glyph (pour distinguer 'mauvaise valeur' de 'mauvais type')
     function glyphKindLocal(g){
@@ -254,16 +276,23 @@ function startTypannotEngine(){
         const c=CASES[j];
         if(c.kind==='value'&&isInteractive(c)&&!st[j].filled){
           const ps=CASES[j-1];
-          if(ps&&ps.kind==='sub variable'&&st[j-1].filled){
+          // UNDEFINED en value : toujours accepté (contenu neutre), quelle que soit la subvar.
+          if(isUndefGlyph(glyph,j)){ return{idx:j, undef:true}; }
+          const subFilledReal = ps && ps.kind==='sub variable' && st[j-1].filled && !st[j-1].isUndef;
+          const subFilledUndef = ps && ps.kind==='sub variable' && st[j-1].filled && st[j-1].isUndef;
+          if(subFilledReal){
             if(gMatch(glyph,j))return{idx:j};
-            // semi/autre tapé ici : si c'est UNE VALUE (bon type) mais pas permise
-            // pour ce groupe -> faute sur ce caractère (bad_value), pas un trou.
             if(glyphKindLocal(glyph)==='value'){ return{err:"bad_value", target:j}; }
             return{err:'value_due', target:j};
           }
-          if(ps&&ps.kind==='sub variable'&&!st[j-1].filled){
+          // subvar UNDEFINED (ou vide) + vraie value -> faute : vraie value exige vraie subvar
+          if((subFilledUndef || (ps&&ps.kind==='sub variable'&&!st[j-1].filled))){
             if(gMatch(glyph,j))return{err:'need_subvar', target:j-1};
           }
+        }
+        // UNDEFINED en subvar libre : accepté (contenu neutre)
+        if(c.kind==='sub variable'&&isInteractive(c)&&!st[j].filled&&isUndefGlyph(glyph,j)){
+          return{idx:j, undef:true};
         }
         if(gMatch(glyph,j)){
           // Part identique au doigt courant sans contenu codé entre = faute (doublon)
@@ -387,7 +416,7 @@ function startTypannotEngine(){
       }
       const j=res.idx; const c=CASES[j];
       if(isInteractive(c)){
-        st[j].filled=true; st[j].glyph=glyph; st[j].srcChar=gi;
+        st[j].filled=true; st[j].glyph=glyph; st[j].srcChar=gi; st[j].isUndef=!!res.undef;
         if(c.kind==='sub variable'&&glyph===G_REFPOS){
           const vK=pairedValueOf(j);
           if(vK>=0&&!st[vK].filled){st[vK].filled=true;st[vK].glyph=G_ZERO;st[vK].srcChar=gi;cursor=vK;continue;}
@@ -1219,6 +1248,51 @@ function startTypannotEngine(){
     const s = result.st[caseIdx];
     return s && (s.filled || s.typed);
   }
+  // Retire les ancres (part + sub part) d'un segment si plus AUCUN glyphe interactif
+  // n'y est rempli. On ne retire une ancre que si aucun autre glyphe ne l'utilise.
+  function cleanupOrphanAnchors(refCaseIdx){
+    // localiser la part et la sub part au-dessus de refCaseIdx
+    let partIdx=-1, subpartIdx=-1;
+    for(let i=refCaseIdx;i>=0;i--){
+      if(CASES[i].kind==='sub part'&&subpartIdx<0)subpartIdx=i;
+      if(CASES[i].kind==='part'){partIdx=i;break;}
+    }
+    function segmentHasContent(startIdx, stopKinds){
+      // y a-t-il un glyphe interactif rempli entre startIdx+1 et la prochaine frontière ?
+      const _g = toGlyphs(inputEl.value);
+      const _r = validate(_g, (typeof modelCaseIds==='function'?modelCaseIds():[]));
+      for(let k=startIdx+1;k<CASES.length;k++){
+        const ck=CASES[k].kind;
+        if(stopKinds.indexOf(ck)>=0)break;
+        if(isInteractive(CASES[k]) && _r.st[k].filled) return true;
+      }
+      return false;
+    }
+    function removeAnchorGlyph(anchorIdx){
+      // retirer le glyphe fixe de l'ancre (part/subpart) du champ + modèle
+      const anchorGlyph = CASES[anchorIdx].fixedGlyph;
+      if(!anchorGlyph) return;
+      const _g = toGlyphs(inputEl.value);
+      const _r = validate(_g, (typeof modelCaseIds==='function'?modelCaseIds():[]));
+      const s = _r.st[anchorIdx];
+      if(!s || !s.typed || s.srcChar<0) return;
+      const raw = Array.from(inputEl.value);
+      let cnt=0, rp=-1;
+      for(let i=0;i<raw.length;i++){ if(raw[i]===DOT)continue; if(cnt===s.srcChar){rp=i;break;} cnt++; }
+      if(rp<0) return;
+      raw.splice(rp,1); inputEl.value=raw.join('');
+      if(typeof modelRemoveAt==='function'){ modelRemoveAt(s.srcChar); }
+    }
+    // 1) la sub part : plus de contenu dans CE segment de subpart -> retirer la subpart
+    if(subpartIdx>=0 && !segmentHasContent(subpartIdx, ['sub part','part','ponctuation'])){
+      removeAnchorGlyph(subpartIdx);
+      // 2) la part : plus AUCUN contenu dans tout le doigt -> retirer la part
+      if(partIdx>=0 && !segmentHasContent(partIdx, ['part','ponctuation'])){
+        removeAnchorGlyph(partIdx);
+      }
+    }
+  }
+
   // Retirer le glyphe occupant une case (clic 'undefined' = vider le bloc).
   // Retire le rec correspondant du champ + du modèle, puis recalcule.
   function removeGlyphFromCase(clickedCaseIdx){
@@ -1239,6 +1313,9 @@ function startTypannotEngine(){
     raw.splice(rawPos, 1);
     inputEl.value = raw.join('');
     if(typeof modelRemoveAt === 'function'){ modelRemoveAt(s.srcChar); }
+    // NETTOYAGE ANCRES : après ce retrait, si le segment (doigt/phalange) n'a plus
+    // aucun glyphe interactif rempli, retirer les ancres part+subpart devenues inutiles.
+    cleanupOrphanAnchors(clickedCaseIdx);
     // Cas couple : si on retire une subvar ref pos, le zero lié (virtuel) part seul.
     // Si on retire une value dont la subvar était un ref pos, retirer aussi le ref pos
     // (le couple ref pos+zero est full linked : vider l'un vide l'autre).
@@ -2115,21 +2192,24 @@ function startTypannotEngine(){
     const host = formulaEl;
     const cs = getComputedStyle(host);
     if(cs.position === 'static'){ host.style.position = 'relative'; }
+    const COPY_IMG = 'https://cdn.prod.website-files.com/6a4537670fb4404edba2a7bb/6a4537670fb4404edba2a7c6_noun-copy-1485763.svg';
     const btn = document.createElement('div');
-    btn.textContent = '⧉';
     btn.title = 'Copier la formule complète';
     btn.setAttribute('aria-label','Copier la formule complète');
     btn.style.cssText = 'position:absolute;top:6px;right:6px;z-index:50;cursor:pointer;'
-      + 'font-size:18px;line-height:1;padding:4px 6px;border-radius:6px;'
-      + 'background:#fff;border:1px solid #ddd;user-select:none;color:#38ba7b;';
-    btn.addEventListener('mouseenter', ()=>{ btn.style.background = '#f0faf5'; });
-    btn.addEventListener('mouseleave', ()=>{ btn.style.background = '#fff'; });
+      + 'width:1.4em;height:1.4em;user-select:none;opacity:.75;';
+    const img = document.createElement('img');
+    img.src = COPY_IMG;
+    img.alt = 'Copier';
+    img.style.cssText = 'width:100%;height:100%;display:block;';
+    btn.appendChild(img);
+    btn.addEventListener('mouseenter', ()=>{ btn.style.opacity = '1'; });
+    btn.addEventListener('mouseleave', ()=>{ btn.style.opacity = '.75'; });
     btn.addEventListener('click', () => {
       const txt = fullFormulaString();
       if(navigator.clipboard){ navigator.clipboard.writeText(txt).catch(()=>{}); }
-      const old = btn.textContent;
-      btn.textContent = '✓';
-      setTimeout(()=>{ btn.textContent = old; }, 900);
+      btn.style.opacity = '.3';
+      setTimeout(()=>{ btn.style.opacity = '.75'; }, 500);
     });
     host.appendChild(btn);
   })();
