@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.3 (règle variable+subvar)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.4 (règle variable+subvar corrigée)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -481,13 +481,15 @@ function startTypannotEngine(){
       }
       cursor=j;
     }
-    // RÈGLE : une VARIABLE activée par l'utilisateur (typed) exige une subvar DÉFINIE.
-    // Si la subvar du bloc est absente OU undefined -> erreur need_subvar sur cette subvar.
-    // Satisfait par : une vraie subvar OU ref pos. PAS par undefined ni par l'absence.
+    // RÈGLE : une VARIABLE activée par l'utilisateur (typed) exige une subvar DÉFINIE,
+    // MAIS seulement si l'utilisateur a tapé AUTRE CHOSE après la variable (il a "quitté"
+    // le bloc sans définir sa subvar). Si la variable est le dernier glyphe saisi, on attend
+    // (pas d'erreur : la subvar peut encore arriver).
+    // Satisfait par : une vraie subvar OU ref pos. PAS undefined ni l'absence.
     for(let vi=0; vi<CASES.length; vi++){
       if(CASES[vi].kind !== 'variable') continue;
-      if(!st[vi].typed) continue; // variable non tapée par l'utilisateur -> pas d'exigence
-      // trouver la subvar de ce bloc = prochaine case 'sub variable' interactive
+      if(!st[vi].typed) continue; // variable non tapée -> pas d'exigence
+      // subvar de ce bloc = prochaine case 'sub variable' interactive
       let subIdx = -1;
       for(let k=vi+1; k<CASES.length; k++){
         const kk = CASES[k].kind;
@@ -497,13 +499,23 @@ function startTypannotEngine(){
       if(subIdx < 0) continue;
       const sfilled = st[subIdx].filled;
       const sundef  = st[subIdx].isUndef;
-      // subvar absente OU undefined -> erreur (déjà présente ? éviter doublon au même 'at')
-      if(!sfilled || sundef){
-        const at = st[vi].srcChar >= 0 ? st[vi].srcChar : (errors.length?errors[errors.length-1].at:0);
-        const already = errors.some(e => e.target === subIdx);
-        if(!already){
-          errors.push({at: at, kind: 'need_subvar', target: subIdx});
-        }
+      if(sfilled && !sundef) continue; // subvar bien définie -> OK
+
+      // subvar absente ou undefined : erreur SEULEMENT si un glyphe a été tapé APRÈS la variable.
+      // On regarde s'il existe un srcChar (glyphe saisi) postérieur à celui de la variable.
+      const varSrc = st[vi].srcChar;
+      if(varSrc < 0) continue;
+      let somethingAfter = false;
+      for(let k=0;k<CASES.length;k++){
+        if((st[k].filled || st[k].typed) && st[k].srcChar > varSrc){ somethingAfter = true; break; }
+      }
+      // (si la subvar elle-même est remplie en undefined, c'est déjà "autre chose" de tapé)
+      if(sundef && st[subIdx].srcChar >= 0) somethingAfter = true;
+      if(!somethingAfter) continue; // variable en fin de saisie -> on attend, pas d'erreur
+
+      const already = errors.some(e => e.target === subIdx);
+      if(!already){
+        errors.push({at: varSrc, kind: 'need_subvar', target: subIdx});
       }
     }
     // re-trier les erreurs par ordre de saisie (at croissant) pour cohérence
