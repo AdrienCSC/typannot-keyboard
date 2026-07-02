@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.1 (accès debug modèle)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -1884,6 +1884,12 @@ function startTypannotEngine(){
   });
   // Accès console au journal de debug (le site n'a pas de textarea) :
   window.typannotJournal = function(){ var j = buildJournal(); console.log(j); return j; };
+  window.typannotModel = function(){
+    var out = MODEL.map(function(r,i){
+      return i+': U+'+r.glyph.codePointAt(0).toString(16).toUpperCase()+' caseId='+(r.caseId||'(clavier)');
+    }).join('\n');
+    console.log(out); return MODEL;
+  };
   // rafraîchir le journal après chaque recalcul (pour le snapshot champ/formule)
   const _origOnInput = onInputChanged;
   // (le snapshot est rafraîchi via les hooks de log ; on force aussi un refresh ici)
