@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.4 (règle variable+subvar corrigée)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.5 (clavier filtré comme la formule)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -1218,7 +1218,7 @@ function startTypannotEngine(){
           // ce ◌ correspond au hole sortedHoles[hi]
           const fpos = sortedHoles[hi];
           const err = holeErrs.find(e => e.at === fpos);
-          lastHoleInfos.push({rawPos:i, kind: err?err.kind:null, target: err?err.target:-1});
+          lastHoleInfos.push({rawPos:i, kind: err?err.kind:null, target: err?err.target:-1, at: err?err.at:-1});
           hi++;
         } else {
           filteredIdx++;
@@ -1979,13 +1979,29 @@ function startTypannotEngine(){
     if(!hole) return {hole:null, glyphs:[], targetCase:-1};
     const targetCase = hole.target;
     let glyphs = [];
+    // helper : une ancre (part/subpart) ne résout QUE si l'insérer dans la formule
+    // complète (juste avant le glyphe orphelin) réduit réellement le nombre d'erreurs.
+    // Même critère que findCandidateCells -> cohérence formule/clavier.
+    function anchorsThatResolve(candidateGlyphs){
+      const _g = toGlyphs(inputEl.value);
+      const _r = validate(_g, (typeof modelCaseIds==='function'?modelCaseIds():[]));
+      const base = (_r.errors||[]).length;
+      // position du glyphe orphelin dans la séquence filtrée = hole.at si dispo, sinon fin
+      const at = (hole.at != null && hole.at >= 0) ? hole.at : _g.length;
+      const out = [];
+      for(const cand of candidateGlyphs){
+        const test = _g.slice(0, at).concat([cand], _g.slice(at));
+        if((validate(test, []).errors||[]).length < base) out.push(cand);
+      }
+      return out;
+    }
     // Les glyphes résolvants dépendent du KIND du manque, pas seulement de la case cible.
     if(hole.kind === 'need_subpart'){
-      // il manque une subpart -> proposer toutes les subparts du doigt
-      glyphs = Object.values(SUBPART_GLYPHS);
+      // il manque une subpart -> proposer SEULEMENT les subparts qui résolvent vraiment
+      glyphs = anchorsThatResolve(Object.values(SUBPART_GLYPHS));
     } else if(hole.kind === 'need_part'){
-      // il manque une part -> proposer les parts
-      glyphs = Object.values(PART_GLYPHS);
+      // il manque une part -> proposer SEULEMENT les parts qui résolvent vraiment
+      glyphs = anchorsThatResolve(Object.values(PART_GLYPHS));
     } else if(targetCase >= 0 && CASES[targetCase] && CASES[targetCase].dataOptions){
       // need_subvar / value_due -> options interactives du bloc cible
       const opts = GROUPS[CASES[targetCase].dataOptions] || [];
