@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR (page finger) — v3.1
+   TYPANNOT — MOTEUR (page finger) — v3.2
    Hébergé en externe (jsDelivr / GitHub).
    Dépend de window.GROUPS (bloc CSV) et du miroir (#input-mirror).
    Démarre sur 'groups-ready'. Debug console : window.typannotJournal()
@@ -2196,7 +2196,7 @@ function startTypannotEngine(){
     const btn = document.createElement('div');
     btn.title = 'Copier la formule complète';
     btn.setAttribute('aria-label','Copier la formule complète');
-    btn.style.cssText = 'position:absolute;top:0.6em;right:1.2em;z-index:50;cursor:pointer;'
+    btn.style.cssText = 'position:absolute;top:0.6em;right:0.4em;z-index:50;cursor:pointer;'
       + 'width:2.2em;height:2.2em;user-select:none;opacity:.75;'
       + 'display:flex;align-items:center;justify-content:center;';
     const img = document.createElement('img');
