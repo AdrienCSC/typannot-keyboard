@@ -1,16 +1,20 @@
 /* ============================================================
-   TYPANNOT — MOTEUR (page finger) — v3.5
+   TYPANNOT — MOTEUR MULTI-PAGES — v4
    Hébergé en externe (jsDelivr / GitHub).
-   Dépend de window.GROUPS (bloc CSV) et du miroir (#input-mirror).
-   Démarre sur 'groups-ready'. Debug console : window.typannotJournal()
+   Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
+   body, upperface). Démarre sur 'groups-ready'.
 
-   v2 : undefined vide le bloc (clic) ; cascade AS/hand -> tous les doigts ;
-        bouton copier la formule complète.
-   v3 : undefined = contenu VALIDE (plus de rouge injustifié au clavier),
-        mais une VRAIE value exige une VRAIE subvar (undefined ne suffit pas) ;
-        clic undefined nettoie les ancres devenues orphelines ;
-        bouton copier-formule utilise l'image copy du site.
-   Redo : le moteur se branche sur .redo-key (à créer dans Webflow).
+   NOUVEAU v4 (généralisation "chaîne d'ancres") :
+   - détection du niveau 'subselection' + normalisation des titres
+     ("Sub Part"/"Sub part"/"Subselection"/"Sub selection")
+   - chaque case connaît sa CHAÎNE D'ANCRES complète
+     (part > selection > sub part > subselection selon la page)
+   - clic sur une value injecte TOUTE la chaîne d'ancres manquante
+     (ex. corner-left -> lips + corner + left ; eyelids -> 4 niveaux)
+   - mapping clavier 'info-subselection'
+   - gardes anti-crash sur les cases sans syntax_text
+   Conserve tout le comportement finger (v3.6) à l'identique.
+   Debug console : window.typannotJournal()
    ============================================================ */
 
 
@@ -50,12 +54,15 @@ function startTypannotEngine(){
   // Modèle statique des cases (structure, ne change jamais)
   // ==== ADAPTATION SITE : construire le modèle depuis .value_wrap/.syntax_text ====
   function kindFromTitle(title){
-    const t = (title||'').toLowerCase();
+    // normaliser : minuscules + espaces multiples réduits (tolère "Sub Part"/"Sub part"/"Subselection")
+    const t = (title||'').toLowerCase().replace(/\s+/g,' ').trim();
     if(t.startsWith('descriptive dimension') || t === 'posture') return 'posture';
     if(t.startsWith('as:')) return 'as';
     if(t.startsWith('class:')) return 'class';
     if(t.startsWith('part:')) return 'part';
     if(t.startsWith('sub part:')) return 'sub part';
+    // subselection AVANT selection (car "sub selection" contient "selection")
+    if(t.startsWith('sub selection') || t.startsWith('subselection')) return 'subselection';
     if(t.startsWith('variable:')) return 'variable';
     if(t.startsWith('sub variable')) return 'sub variable';
     if(t.startsWith('value:')) return 'value';
@@ -69,8 +76,28 @@ function startTypannotEngine(){
     if(opt.startsWith('value-')) return 'value';
     return '?';
   }
+  // Niveau hiérarchique d'une ancre (étiquette fixe qui précède un bloc).
+  // part < selection < sub part < subselection. Les non-ancres renvoient 0.
+  function anchorLevel(kind){
+    switch(kind){
+      case 'part': return 1;
+      case 'selection': return 2;
+      case 'sub part': return 3;
+      case 'subselection': return 4;
+      default: return 0;
+    }
+  }
+  function isAnchorKind(kind){ return anchorLevel(kind) > 0; }
+  // nom lisible extrait d'un title "Kind: name" -> "name"
+  function nameFromTitle(title){
+    const m = (title||'').split(':');
+    return m.length>1 ? m.slice(1).join(':').trim() : (title||'').trim();
+  }
   const CASES = [];
   formulaEl.querySelectorAll('.framework_wrap').forEach(fw => {
+    // pile d'ancres courantes DANS ce framework_wrap (réinitialisée à chaque wrap)
+    // chaque entrée : {level, kind, name, glyph, caseIdx}
+    let anchorStack = [];
     Array.from(fw.children).forEach(child => {
       if(!child.classList || !child.classList.contains('value_wrap')) return;
       const dataOptions = child.getAttribute('data-options');
@@ -83,26 +110,50 @@ function startTypannotEngine(){
         kind = kindFromTitle(title);
         fixedGlyph = mainSt ? mainSt.textContent : null;
       }
+      const idx = CASES.length;
+      // mise à jour de la pile d'ancres : une ancre de niveau L retire toutes les
+      // ancres de niveau >= L (on change de branche) puis s'empile. Une part (L1)
+      // remet la pile à zéro. Ponctuation (part end) vide la pile.
+      if(kind === 'ponctuation'){
+        anchorStack = [];
+      } else if(isAnchorKind(kind)){
+        const L = anchorLevel(kind);
+        anchorStack = anchorStack.filter(a => a.level < L);
+        anchorStack.push({level:L, kind:kind, name:nameFromTitle(title), glyph:fixedGlyph, caseIdx:idx});
+      }
+      // chaîne d'ancres de CETTE case = copie de la pile courante
+      // (pour une ancre, sa chaîne inclut elle-même ; pour un bloc, ce sont ses ancres parentes)
+      const anchorChain = anchorStack.map(a => ({level:a.level, kind:a.kind, name:a.name, glyph:a.glyph, caseIdx:a.caseIdx}));
       CASES.push({
-        idx: CASES.length,
+        idx: idx,
         el: child,
         span: mainSt,
         kind: kind,
         dataOptions: dataOptions || null,
         title: title,
+        name: nameFromTitle(title),
         fixedGlyph: fixedGlyph,
-        initialGlyph: mainSt ? mainSt.textContent : ''  // glyphe d'origine (fallback si pas d'undefined)
+        anchorChain: anchorChain,
+        initialGlyph: mainSt ? mainSt.textContent : ''
       });
     });
   });
 
   function isInteractive(c){ return c.dataOptions != null; }
+  // signature d'identité d'un bloc/case = sa chaîne d'ancres (glyphes) + variable au-dessus.
+  // Deux cases interactives sont dans des blocs différents si leur signature diffère.
+  function anchorSignature(caseIdx){
+    const c = CASES[caseIdx];
+    if(!c) return '';
+    return c.anchorChain.map(a => a.level+':'+(a.glyph||a.name)).join('|');
+  }
 
   // Table glyph -> kind, construite depuis le CLAVIER (source de vérité fiable :
   // chaque touche appartient à une catégorie, même si le glyph n'est pas dans la formule).
   const KEYBOARD_KIND = {};
   (function(){
     const map = {'info-descdim':'descriptive dimension','info-as':'as','info-selection':'selection',
+                 'info-subselection':'subselection',
                  'info-part':'part','info-subpart':'sub part','info-variable':'variable',
                  'info-subvariable':'sub variable','info-value':'value','info-ponct':'ponctuation'};
     document.querySelectorAll('.key').forEach(btn => {
@@ -471,6 +522,7 @@ function startTypannotEngine(){
     // 2. Afficher les glyphs (avec l'état fusionné)
     CASES.forEach((c,i) => {
       const span = c.span;
+      if(!span) return; // case sans syntax_text (structure incomplète) : ignorer, pas de crash
       span.classList.remove('errcell','impactcell','solcell');
       if(isInteractive(c)){
         const filledHere = mergedDisplaySt[i] && mergedDisplaySt[i].filled;
@@ -681,7 +733,7 @@ function startTypannotEngine(){
     //    colorer cette case (priorité sur tout le reste).
     const dupCell = findDuplicateCell(glyphs, result);
     if(dupCell >= 0){
-      CASES[dupCell].span.classList.add('errcell');
+      if(CASES[dupCell].span) CASES[dupCell].span.classList.add('errcell');
       return;
     }
 
@@ -690,7 +742,7 @@ function startTypannotEngine(){
     if(candidateCells !== null){
       // need_part ou need_subpart = TROU -> solutions en BLEU
       if(candidateCells.length > 0){
-        candidateCells.forEach(idx => CASES[idx].span.classList.add('solcell'));
+        candidateCells.forEach(idx => { if(CASES[idx].span) CASES[idx].span.classList.add('solcell'); });
         return;
       }
       // si aucune candidate trouvée, fallback ci-dessous
@@ -700,7 +752,7 @@ function startTypannotEngine(){
     if(errorTarget == null || errorTarget < 0) return;
     // bad_value : la value est présente mais invalide -> ROUGE sur la case value
     if(errorKind === 'bad_value'){
-      CASES[errorTarget].span.classList.add('errcell');
+      if(CASES[errorTarget].span) CASES[errorTarget].span.classList.add('errcell');
       return;
     }
     let cellToMark = -1;
@@ -722,7 +774,7 @@ function startTypannotEngine(){
     }
     else { cellToMark = errorTarget; }  // no_match -> rouge (faute)
     if(cellToMark >= 0){
-      CASES[cellToMark].span.classList.add(isHole ? 'solcell' : 'errcell');
+      if(CASES[cellToMark].span) CASES[cellToMark].span.classList.add(isHole ? 'solcell' : 'errcell');
     }
   }
 
@@ -1471,25 +1523,23 @@ function startTypannotEngine(){
         return;
       }
     }
-    // 1. Déterminer les ancres nécessaires (part + subpart du segment de la case cliquée)
+    // 1. Déterminer les ancres nécessaires : TOUTE la chaîne d'ancres de la case cliquée
+    //    (part, selection, sub part, subselection selon la page). Généralise part+subpart.
     const toInsert = []; // liste de {glyph, caseIdx}
-    const partCell = partCellAbove(clickedCaseIdx);
-    const subCell = subpartCellAbove(clickedCaseIdx);
-    // n'injecter une ancre que si sa case n'est pas déjà remplie/tapée dans le champ
     const fieldGlyphs = toGlyphs(inputEl.value);
-    if(partCell >= 0){
-      const pn = partNameOf(partCell);
-      const pg = PART_GLYPHS[pn] || CASES[partCell].fixedGlyph;
-      // n'injecter le doigt que si son glyphe n'est PAS déjà dans le champ (couvre tous ses segments)
-      if(pg && !fieldGlyphs.includes(pg)) toInsert.push({glyph: pg, caseIdx: partCell});
-    }
-    if(subCell >= 0){
-      const sn = CASES[subCell].title.split(':').length>1 ? CASES[subCell].title.split(':')[1].trim() : CASES[subCell].title.trim();
-      const sg = SUBPART_GLYPHS[sn] || CASES[subCell].fixedGlyph;
-      // n'injecter la subpart que si ce segment précis n'est pas déjà couvert.
-      // On vérifie via caseAlreadyFilled (la subpart est propre à un segment).
-      if(sg && !caseAlreadyFilled(subCell)) toInsert.push({glyph: sg, caseIdx: subCell});
-    }
+    const chain = CASES[clickedCaseIdx] ? CASES[clickedCaseIdx].anchorChain : [];
+    chain.forEach(a => {
+      const ag = a.glyph || (CASES[a.caseIdx] ? CASES[a.caseIdx].fixedGlyph : null);
+      if(!ag) return;
+      if(a.level === 1){
+        // PART : n'injecter que si son glyphe n'est pas déjà présent (couvre tous ses segments)
+        if(!fieldGlyphs.includes(ag)) toInsert.push({glyph: ag, caseIdx: a.caseIdx});
+      } else {
+        // selection / sub part / subselection : propres à un segment précis.
+        // n'injecter que si cette case d'ancre n'est pas déjà remplie dans le champ.
+        if(!caseAlreadyFilled(a.caseIdx)) toInsert.push({glyph: ag, caseIdx: a.caseIdx});
+      }
+    });
     // ref pos / zero cliqué dans la formule : remplir le bloc SANS cascade.
     // On injecte : la variable du bloc (casse la cascade) + ref pos sur la subvar
     // + zero sur la value (le linkage de paire, appliqué explicitement au seul bloc).
@@ -2196,9 +2246,8 @@ function startTypannotEngine(){
     const btn = document.createElement('div');
     btn.title = 'Copier la formule complète';
     btn.setAttribute('aria-label','Copier la formule complète');
-    btn.style.cssText = 'position:absolute;top:0.6em;right:3.6em;z-index:50;cursor:pointer;'
-      + 'width:2.2em;height:2.2em;user-select:none;opacity:.75;'
-      + 'display:flex;align-items:center;justify-content:center;';
+    btn.style.cssText = 'position:absolute;top:6px;right:6px;z-index:50;cursor:pointer;'
+      + 'width:1.4em;height:1.4em;user-select:none;opacity:.75;';
     const img = document.createElement('img');
     img.src = COPY_IMG;
     img.alt = 'Copier';
