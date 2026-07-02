@@ -1,9 +1,10 @@
 /* ============================================================
-   TYPANNOT — MOTEUR (page finger)
-   Hébergé en externe (jsDelivr / GitHub), chargé via :
-     <script src="https://cdn.jsdelivr.net/gh/USER/REPO@main/typannot-moteur.js"></script>
-   Dépend de window.GROUPS (fourni par le bloc CSV) et du miroir (#input-mirror).
-   Démarre sur l'événement 'groups-ready'. Debug console : window.typannotJournal()
+   TYPANNOT — MOTEUR (page finger) — v2 (lot B inclus)
+   Hébergé en externe (jsDelivr / GitHub).
+   Dépend de window.GROUPS (bloc CSV) et du miroir (#input-mirror).
+   Démarre sur 'groups-ready'. Debug console : window.typannotJournal()
+   Lot B : undefined vide le bloc ; cascade AS/hand -> tous les doigts ;
+           bouton copier la formule complète (haut-droite de la formule).
    ============================================================ */
 
 
@@ -166,6 +167,19 @@ function startTypannotEngine(){
       }
       return blocks;
     }
+    function blocksInAllFingers(){
+      // TOUS les blocs (subvar interactive + sa value) de TOUTE la formule.
+      const blocks=[];
+      for(let k=0;k<CASES.length;k++){
+        const ck=CASES[k].kind;
+        if(ck==='sub variable'&&isInteractive(CASES[k]))blocks.push({sub:k,val:null});
+        if(ck==='value'&&isInteractive(CASES[k])&&blocks.length){
+          const last=blocks[blocks.length-1];
+          if(last.val==null)last.val=k;
+        }
+      }
+      return blocks;
+    }
     function blocksInSubpart(subIdx){
       const blocks=[];
       for(let k=subIdx+1;k<CASES.length;k++){
@@ -308,6 +322,17 @@ function startTypannotEngine(){
       // cascade
       if(glyph===G_REFPOS||glyph===G_ZERO){
         const lc=cursor>=0?CASES[cursor]:null;
+        // NIVEAU AS/HAND : ref pos/zero juste après selection ou AS (finger) ->
+        // remplir TOUS les blocs de TOUS les doigts avec les couples ref pos + zero linkés.
+        if(lc&&(lc.kind==='selection'||lc.kind==='as')){
+          const blocks=blocksInAllFingers();
+          if(blocks.length){
+            const f=cascadeFill(blocks, gi);
+            const mx=Math.max.apply(null,f);
+            if(mx>cursor)cursor=mx;
+            continue;
+          }
+        }
         if(lc&&lc.kind==='part'){
           const blocks=blocksInWholeFinger(cursor);
           if(blocks.length){
@@ -1194,6 +1219,46 @@ function startTypannotEngine(){
     const s = result.st[caseIdx];
     return s && (s.filled || s.typed);
   }
+  // Retirer le glyphe occupant une case (clic 'undefined' = vider le bloc).
+  // Retire le rec correspondant du champ + du modèle, puis recalcule.
+  function removeGlyphFromCase(clickedCaseIdx){
+    if(clickedCaseIdx == null || clickedCaseIdx < 0 || !CASES[clickedCaseIdx]) return;
+    const _g = toGlyphs(inputEl.value);
+    const _r = validate(_g, (typeof modelCaseIds==='function'?modelCaseIds():[]));
+    const s = _r.st[clickedCaseIdx];
+    if(!s || !(s.filled || s.typed) || s.srcChar < 0) return;
+    // trouver la position RAW du caractère à retirer
+    const raw = Array.from(inputEl.value);
+    let cnt = 0, rawPos = -1;
+    for(let i=0;i<raw.length;i++){
+      if(raw[i] === DOT) continue;
+      if(cnt === s.srcChar){ rawPos = i; break; }
+      cnt++;
+    }
+    if(rawPos < 0) return;
+    raw.splice(rawPos, 1);
+    inputEl.value = raw.join('');
+    if(typeof modelRemoveAt === 'function'){ modelRemoveAt(s.srcChar); }
+    // Cas couple : si on retire une subvar ref pos, le zero lié (virtuel) part seul.
+    // Si on retire une value dont la subvar était un ref pos, retirer aussi le ref pos
+    // (le couple ref pos+zero est full linked : vider l'un vide l'autre).
+    if(CASES[clickedCaseIdx].kind === 'value'){
+      const subCase = clickedCaseIdx - 1;
+      if(CASES[subCase] && CASES[subCase].kind === 'sub variable'){
+        const _g2 = toGlyphs(inputEl.value);
+        const _r2 = validate(_g2, (typeof modelCaseIds==='function'?modelCaseIds():[]));
+        const ss = _r2.st[subCase];
+        if(ss && (ss.filled||ss.typed) && ss.glyph === G_REFPOS && ss.srcChar >= 0){
+          const raw2 = Array.from(inputEl.value);
+          let c2=0, rp2=-1;
+          for(let i=0;i<raw2.length;i++){ if(raw2[i]===DOT)continue; if(c2===ss.srcChar){rp2=i;break;} c2++; }
+          if(rp2>=0){ raw2.splice(rp2,1); inputEl.value=raw2.join('');
+            if(typeof modelRemoveAt==='function'){ modelRemoveAt(ss.srcChar); } }
+        }
+      }
+    }
+    onInputChanged('clic-formule');
+  }
   // Injecte, à leur position ordonnée, les ancres (part+subpart) manquantes puis le glyphe.
   function insertGlyphOrdered(glyph, clickedCaseIdx){
     // garde : ignorer un index de case invalide (case inexistante)
@@ -1714,8 +1779,15 @@ function startTypannotEngine(){
       if(!option) return;
       e.stopPropagation();
       panel.classList.remove('is_open');
-      // au lieu de modifier la formule directement, on ÉCRIT le glyphe choisi dans le
-      // champ à sa position ordonnée (la case cliquée = c.idx). Le moteur fera le rendu.
+      // POINT 5 : si l'option cliquée est 'undefined', on VIDE le bloc (retrait),
+      // au lieu d'insérer un glyphe. Détecté via le glyphe undefined du groupe.
+      const grpOpts = (window.GROUPS && window.GROUPS[c.dataOptions]) ? window.GROUPS[c.dataOptions] : [];
+      const undefOpt = grpOpts.find(o => o.label === 'undefined');
+      if(undefOpt && option.textContent === undefOpt.glyph){
+        removeGlyphFromCase(c.idx);
+        logFormulaClick('undefined', c.idx);
+        return;
+      }
       insertGlyphOrdered(option.textContent, c.idx);
       logFormulaClick(option.textContent, c.idx);
     });
@@ -2025,6 +2097,43 @@ function startTypannotEngine(){
   });
   inputEl.addEventListener('mouseleave', clearViolet);
 
+  // ===== POINT 7 : BOUTON COPIER LA FORMULE COMPLÈTE =====
+  // Copie la suite des glyphes de TOUTES les cases de la formule (fixes + interactives),
+  // y compris les 'undefined' (le glyphe réellement affiché dans chaque case).
+  function fullFormulaString(){
+    let out = '';
+    CASES.forEach(c => {
+      if(!c.span) return;
+      const g = c.span.textContent || '';
+      out += g;
+    });
+    return out;
+  }
+  (function addCopyFormulaButton(){
+    if(!formulaEl) return;
+    // conteneur positionné : la formule doit être relative pour ancrer le bouton
+    const host = formulaEl;
+    const cs = getComputedStyle(host);
+    if(cs.position === 'static'){ host.style.position = 'relative'; }
+    const btn = document.createElement('div');
+    btn.textContent = '⧉';
+    btn.title = 'Copier la formule complète';
+    btn.setAttribute('aria-label','Copier la formule complète');
+    btn.style.cssText = 'position:absolute;top:6px;right:6px;z-index:50;cursor:pointer;'
+      + 'font-size:18px;line-height:1;padding:4px 6px;border-radius:6px;'
+      + 'background:#fff;border:1px solid #ddd;user-select:none;color:#38ba7b;';
+    btn.addEventListener('mouseenter', ()=>{ btn.style.background = '#f0faf5'; });
+    btn.addEventListener('mouseleave', ()=>{ btn.style.background = '#fff'; });
+    btn.addEventListener('click', () => {
+      const txt = fullFormulaString();
+      if(navigator.clipboard){ navigator.clipboard.writeText(txt).catch(()=>{}); }
+      const old = btn.textContent;
+      btn.textContent = '✓';
+      setTimeout(()=>{ btn.textContent = old; }, 900);
+    });
+    host.appendChild(btn);
+  })();
+
   onInputChanged('init');
   console.log('[moteur] Typannot démarré — ' + CASES.length + ' cases.');
 }
@@ -2053,4 +2162,3 @@ function startTypannotEngine(){
     if(tryStart() || tries > 40){ clearInterval(iv); } // ~10s max
   }, 250);
 })();
-
