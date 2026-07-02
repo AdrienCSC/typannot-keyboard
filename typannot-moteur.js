@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.1 (accès debug modèle)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.3 (règle variable+subvar)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -481,6 +481,33 @@ function startTypannotEngine(){
       }
       cursor=j;
     }
+    // RÈGLE : une VARIABLE activée par l'utilisateur (typed) exige une subvar DÉFINIE.
+    // Si la subvar du bloc est absente OU undefined -> erreur need_subvar sur cette subvar.
+    // Satisfait par : une vraie subvar OU ref pos. PAS par undefined ni par l'absence.
+    for(let vi=0; vi<CASES.length; vi++){
+      if(CASES[vi].kind !== 'variable') continue;
+      if(!st[vi].typed) continue; // variable non tapée par l'utilisateur -> pas d'exigence
+      // trouver la subvar de ce bloc = prochaine case 'sub variable' interactive
+      let subIdx = -1;
+      for(let k=vi+1; k<CASES.length; k++){
+        const kk = CASES[k].kind;
+        if(kk === 'sub variable' && isInteractive(CASES[k])){ subIdx = k; break; }
+        if(kk === 'variable' || kk === 'part' || kk === 'sub part' || kk === 'ponctuation') break;
+      }
+      if(subIdx < 0) continue;
+      const sfilled = st[subIdx].filled;
+      const sundef  = st[subIdx].isUndef;
+      // subvar absente OU undefined -> erreur (déjà présente ? éviter doublon au même 'at')
+      if(!sfilled || sundef){
+        const at = st[vi].srcChar >= 0 ? st[vi].srcChar : (errors.length?errors[errors.length-1].at:0);
+        const already = errors.some(e => e.target === subIdx);
+        if(!already){
+          errors.push({at: at, kind: 'need_subvar', target: subIdx});
+        }
+      }
+    }
+    // re-trier les erreurs par ordre de saisie (at croissant) pour cohérence
+    errors.sort((a,b)=> a.at - b.at);
     // rétrocompat : errorAt/Kind/Target = la PREMIÈRE erreur (ou -1 si aucune)
     const first = errors.length ? errors[0] : null;
     return {
@@ -646,13 +673,13 @@ function startTypannotEngine(){
     const cells = [];
 
     if(kind === 'need_part'){
-      // tester chaque doigt : préfixer par le glyph du doigt
+      // CRITÈRE ROBUSTE (solveur) : un doigt n'est candidat que si l'insérer dans la
+      // formule complète (juste avant l'orphelin) réduit réellement le nombre d'erreurs.
+      const baseErr = (validate(glyphs).errors || []).length;
       for(const [name, pg] of Object.entries(PART_GLYPHS)){
-        const test = [pg, ...orphan];
-        const r = validate(test);
-        if(r.errorAt < 0){
-          // candidat valide -> trouver la case 'part' de ce doigt qui est ENCORE LIBRE
-          // (premier segment du doigt non rempli). On colore la 1re case part du doigt.
+        const test = glyphs.slice(0, at).concat([pg], glyphs.slice(at));
+        const nErr = (validate(test).errors || []).length;
+        if(nErr < baseErr){
           const cell = firstPartCellOf(name);
           if(cell>=0 && !cellFingerHasContent(name, result)) cells.push(cell);
         }
@@ -661,12 +688,15 @@ function startTypannotEngine(){
       // on connaît le doigt (part tapée avant 'at')
       let partGlyph = null;
       for(let i=at-1;i>=0;i--){ if(glyphKind(glyphs[i])==='part'){ partGlyph=glyphs[i]; break; } }
+      // CRITÈRE ROBUSTE (solveur) : une subpart n'est candidate que si l'INSÉRER dans la
+      // formule COMPLÈTE (juste avant le glyphe orphelin 'at') réduit réellement le nombre
+      // d'erreurs. Cela écarte les subparts qui n'accueillent pas le type du glyphe orphelin
+      // (ex : phalanx 1 ne peut pas recevoir un flx/ext -> ne résout pas -> écartée).
+      const baseErr = (validate(glyphs).errors || []).length;
       for(const [name, sg] of Object.entries(SUBPART_GLYPHS)){
-        const test = partGlyph ? [partGlyph, sg, ...orphan] : [sg, ...orphan];
-        const r = validate(test);
-        if(r.errorAt < 0){
-          // candidat subpart valide -> colorer la case subpart correspondante
-          // (celle du doigt courant). Trouver l'idx de cette subpart dans le doigt courant.
+        const test = glyphs.slice(0, at).concat([sg], glyphs.slice(at));
+        const nErr = (validate(test).errors || []).length;
+        if(nErr < baseErr){
           const cell = subpartCellInCurrentFinger(partGlyph, name, result);
           if(cell>=0) cells.push(cell);
         }
