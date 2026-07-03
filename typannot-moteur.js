@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.14 (cascade: regle du caractere - traverse une ancre de meme niveau si meme glyphe, ex lips repete)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.15 (upper-limb: selection skipable comme finger)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -103,7 +103,7 @@ function startTypannotEngine(){
   // ===== TABLE 3 — SKIP : niveaux ancrants SKIPABLES par page ===== (voir après detectPage)
   const ANCHOR_SKIPPABLE = {
     finger:      ['selection'],
-    'upper-limb':[],
+    'upper-limb':['selection'],
     body:        [],
     lowerface:   [],
     upperface:   [],
