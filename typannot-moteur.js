@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.9 (SYNTAXE universelle: ancrage relations R01c, kinds R02, R13 doublon, candidats + P03 generiques)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.11 (vocabulaire d'ancrage purge des regles: raisonnement par niveaux relatifs via primitives anchorChain)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -140,10 +140,12 @@ function startTypannotEngine(){
     return m.length>1 ? m.slice(1).join(':').trim() : (title||'').trim();
   }
   const CASES = [];
+  // Pile d'ancres PERSISTANTE à travers les framework_wrap : les wraps sont un découpage de mise
+  // en page Webflow, PAS des frontières sémantiques. L'AS (racine) et les parts peuvent vivre
+  // dans des wraps différents ; la chaîne d'ancrage doit rester continue. (Seule la ponctuation
+  // "part end" ferme une part — en gardant l'AS.)
+  let anchorStack = [];
   formulaEl.querySelectorAll('.framework_wrap').forEach(fw => {
-    // pile d'ancres courantes DANS ce framework_wrap (réinitialisée à chaque wrap)
-    // chaque entrée : {level, kind, name, glyph, caseIdx}
-    let anchorStack = [];
     Array.from(fw.children).forEach(child => {
       if(!child.classList || !child.classList.contains('value_wrap')) return;
       const dataOptions = child.getAttribute('data-options');
@@ -162,9 +164,10 @@ function startTypannotEngine(){
       // autorisé de E (on remonte jusqu'au bon parent, quel que soit son kind sur cette page).
       // Puis E s'empile SOUS ce parent. AS = racine (vide la pile). Ponctuation vide tout.
       // La profondeur d'une ancre = sa position dans la pile (0 = AS/racine).
-      if(kind === 'ponctuation'){
-        anchorStack = [];
-      } else if(kind === 'as'){
+      // La ponctuation ("part end", "annot end") est un REPÈRE VISUEL pour l'utilisateur, pas
+      // une frontière sémantique : elle ne modifie PAS la pile d'ancrage. Toute la hiérarchie se
+      // décide par les anchor levels (relations parent->enfant R01c), jamais par la ponctuation.
+      if(kind === 'as'){
         anchorStack = [{ depth:0, kind:'as', name:nameFromTitle(title), glyph:fixedGlyph, caseIdx:idx }];
       } else if(isAnchorKind(kind)){
         // dépiler jusqu'à trouver un parent autorisé de E (ou vider si aucun -> E devient racine
@@ -195,6 +198,78 @@ function startTypannotEngine(){
   });
 
   function isInteractive(c){ return c.dataOptions != null; }
+
+  // ============================================================================
+  // PRIMITIVES D'ANCRAGE UNIVERSELLES
+  // ----------------------------------------------------------------------------
+  // Toute règle syntaxique raisonne en NIVEAUX RELATIFS (parent = -1, enfant = +1, sommet,
+  // niveau le plus bas...), lus depuis anchorChain. AUCUNE règle ne nomme un niveau ('part',
+  // 'sub part', ...). Le vocabulaire spécifique ne vit QUE dans le mapping DOM->kind
+  // (kindFromTitle) et la table de branches R01c. Les niveaux se calculent, ils ne se nomment pas.
+  //
+  // anchorChain d'une case = [{level, kind, glyph, caseIdx}, ...] du sommet (level 0 = AS/racine)
+  // vers le bas. Pour une case interactive (bloc), ce sont ses ancres parentes.
+
+  // Profondeur d'ancrage d'une CASE (= longueur de sa chaîne si c'est une ancre ; 0 sinon).
+  function anchorDepthOf(caseIdx){
+    const c = CASES[caseIdx];
+    if(!c || !isAnchorKind(c.kind)) return 0;
+    return c.anchorChain ? c.anchorChain.length : 0;
+  }
+  // La chaîne d'ancres parentes d'une case (maillons AU-DESSUS d'elle). Pour une ancre, on
+  // exclut le maillon qui est elle-même. Retourne [{level, kind, glyph, caseIdx}, ...].
+  function parentChainOf(caseIdx){
+    const c = CASES[caseIdx];
+    if(!c || !c.anchorChain) return [];
+    if(isAnchorKind(c.kind)){
+      // c est une ancre : sa chaîne l'inclut en dernier -> retirer le maillon == caseIdx
+      return c.anchorChain.filter(a => a.caseIdx !== caseIdx);
+    }
+    return c.anchorChain.slice(); // bloc : toute la chaîne est parente
+  }
+  // Le caseIdx de l'ancre parente de niveau donné (0 = racine/AS) dans la chaîne d'une case.
+  function anchorCaseAtLevel(caseIdx, level){
+    const chain = (CASES[caseIdx] && CASES[caseIdx].anchorChain) || [];
+    for(const a of chain){ if(a.level === level) return a.caseIdx; }
+    return -1;
+  }
+  // L'ancre parente IMMÉDIATE d'une case (niveau le plus profond de sa chaîne parente = -1).
+  // Retourne le caseIdx, ou -1 si aucune (case sous la seule racine / sans parent ancrant).
+  function immediateParentAnchor(caseIdx){
+    const pc = parentChainOf(caseIdx);
+    if(!pc.length) return -1;
+    // le parent immédiat = maillon de plus grand level (le plus bas dans la hiérarchie)
+    let best = pc[0];
+    for(const a of pc){ if(a.level > best.level) best = a; }
+    return best.caseIdx;
+  }
+  // Toutes les ancres parentes d'une case, du plus BAS (immédiat) au plus HAUT (racine).
+  // Utile pour retirer/vérifier la colonne d'ancrage complète, sans nommer aucun niveau.
+  function parentAnchorsBottomUp(caseIdx){
+    const pc = parentChainOf(caseIdx).filter(a => a.kind !== 'as'); // hors racine AS
+    pc.sort((x,y) => y.level - x.level); // du plus bas (level élevé) au plus haut
+    return pc.map(a => a.caseIdx);
+  }
+  // Frontière de portée générique : depuis une ancre `anchorIdx`, l'index de fin (exclu) de sa
+  // sous-arborescence = 1re case dont l'ancre est de niveau <= celui de anchorIdx. Ponctuation
+  // NEUTRE (repère visuel), jamais une frontière. C'est LA borne universelle des règles.
+  function scopeEndOf(anchorIdx){
+    const L = anchorDepthOf(anchorIdx);
+    for(let k=anchorIdx+1;k<CASES.length;k++){
+      if(isAnchorKind(CASES[k].kind) && anchorDepthOf(k) <= L) return k;
+    }
+    return CASES.length;
+  }
+  // Y a-t-il un bloc interactif (subvar) rempli dans la sous-arborescence d'une ancre ?
+  // (générique, remplace tous les "segmentHasContent" nommés). st = agencement d'un validate.
+  function subtreeHasFilledBlock(anchorIdx, st){
+    const end = scopeEndOf(anchorIdx);
+    for(let k=anchorIdx+1;k<end;k++){
+      if(isInteractive(CASES[k]) && CASES[k].kind==='sub variable' && st[k] && st[k].filled) return true;
+    }
+    return false;
+  }
+  // ============================================================================
   // signature d'identité d'un bloc/case = sa chaîne d'ancres (glyphes) + variable au-dessus.
   // Deux cases interactives sont dans des blocs différents si leur signature diffère.
   function anchorSignature(caseIdx){
@@ -268,7 +343,7 @@ function startTypannotEngine(){
       for(let k=subIdx+1;k<CASES.length;k++){
         if(CASES[k].kind==='value'&&isInteractive(CASES[k]))return k;
         if(CASES[k].kind==='sub variable')return -1;
-        if(CASES[k].kind==='part'||CASES[k].kind==='sub part')return -1;
+        if(isAnchorKind(CASES[k].kind))return -1; // sortie du bloc : toute ancre borne
       } return -1;
     }
     function pairedSubOf(valIdx){
@@ -290,15 +365,14 @@ function startTypannotEngine(){
     }
     function anchorLevelAt(i){ return depthAt(i); }
     // PORTÉE d'une ancre (case anchorIdx) = de la case suivante jusqu'à (exclue) la prochaine
-    // ANCRE de profondeur <= celle de anchorIdx (on sort de la sous-arborescence), ou une
-    // ponctuation, ou la fin. La frontière se lit sur la profondeur réelle des cases.
+    // ANCRE de niveau <= celui de anchorIdx (on sort de sa sous-arborescence), ou la fin.
+    // La ponctuation est neutre (repère visuel) : elle ne borne rien. Tout est anchor level.
     function blocksUnderAnchor(anchorIdx){
       const L=depthAt(anchorIdx);
       if(L===0) return [];
       const blocks=[];
       for(let k=anchorIdx+1;k<CASES.length;k++){
         const ck=CASES[k].kind;
-        if(ck==='ponctuation') break;
         if(isAnchorKind(ck) && depthAt(k)<=L) break; // frontière : sorti de la sous-arborescence
         if(ck==='sub variable'&&isInteractive(CASES[k])) blocks.push({sub:k,val:null});
         if(ck==='value'&&isInteractive(CASES[k])&&blocks.length){
@@ -314,7 +388,6 @@ function startTypannotEngine(){
       let last=anchorIdx;
       for(let k=anchorIdx+1;k<CASES.length;k++){
         const ck=CASES[k].kind;
-        if(ck==='ponctuation') break;
         if(isAnchorKind(ck) && depthAt(k)<=L) break;
         last=k;
       }
@@ -327,12 +400,6 @@ function startTypannotEngine(){
         if(b.val!=null&&!st[b.val].filled){st[b.val].filled=true;st[b.val].glyph=G_ZERO;st[b.val].srcChar=gi;f.push(b.val);}
       });
       return f;
-    }
-    function partTypedBeforeCursor(){
-      for(let k=cursor;k>=0;k--){
-        if(CASES[k].kind==='ponctuation'&&st[k].typed)return false;
-        if(CASES[k].kind==='part'&&st[k].typed)return true;
-      } return false;
     }
     function findForward(glyph, forcedCaseId){
       // Si le rec porte un caseId (glyphe posé via la formule sur un bloc précis), on FORCE
@@ -356,7 +423,6 @@ function startTypannotEngine(){
         }
         // case cible déjà remplie ou introuvable : laisser la logique normale décider
       }
-      const hadPart=partTypedBeforeCursor();
 
       // R01b — Manque d'ancrage GÉNÉRIQUE (multi-niveaux, lu depuis anchorChain).
       // Pour une case cible j, on remonte sa chaîne d'ancres (du sommet vers le bas). Le premier
@@ -426,14 +492,12 @@ function startTypannotEngine(){
             if(dup) return{err:'no_match'};
           }
           // Manque d'ancrage (multi-niveaux) : si la chaîne de j a un maillon ancrant non posé,
-          // c'est ce niveau qui manque. Ne s'applique qu'aux cases qui SONT sous ancrage
-          // (value / subvar / sub part / subselection / selection selon la page).
-          if(c.kind==='sub part' || c.kind==='subselection' || c.kind==='sub variable' ||
-             c.kind==='value' || c.kind==='selection' || c.kind==='part'){
-            const miss = missingAnchorFor(j);
-            if(miss && miss.caseIdx !== j){   // j lui-même n'est pas "son propre manque"
-              return{err:miss.kind, target:miss.caseIdx};
-            }
+          // c'est ce niveau qui manque. missingAnchorFor lit la chaîne réelle de j : si la case
+          // n'a aucune ancre parente manquante (ou aucune chaîne), il retourne null -> pas d'erreur.
+          // Aucun niveau nommé : la chaîne d'ancrage décide.
+          const miss = missingAnchorFor(j);
+          if(miss && miss.caseIdx !== j){   // j lui-même n'est pas "son propre manque"
+            return{err:miss.kind, target:miss.caseIdx};
           }
           return{idx:j};
         }
@@ -447,11 +511,10 @@ function startTypannotEngine(){
     // est posée dans sa portée. Générique sur la chaîne.
     function anchorReInvocationDuplicate(j){
       const Lj = depthAt(j);
-      // portée de j = jusqu'à la prochaine ancre de profondeur <= Lj (ou ponctuation/fin)
+      // portée de j = jusqu'à la prochaine ancre de niveau <= Lj (ou fin). Ponctuation neutre.
       let end = CASES.length;
       for(let k=j+1;k<CASES.length;k++){
         const ck=CASES[k].kind;
-        if(ck==='ponctuation'){ end=k; break; }
         if(isAnchorKind(ck) && depthAt(k)<=Lj){ end=k; break; }
       }
       // sous-niveaux ancrants IMMÉDIATS (profondeur exactement Lj+1) dans la portée
@@ -578,7 +641,7 @@ function startTypannotEngine(){
       for(let k=vi+1; k<CASES.length; k++){
         const kk = CASES[k].kind;
         if(kk === 'sub variable' && isInteractive(CASES[k])){ subIdx = k; break; }
-        if(kk === 'variable' || kk === 'part' || kk === 'sub part' || kk === 'ponctuation') break;
+        if(kk === 'variable' || isAnchorKind(kk)) break; // sortie du bloc (ponctuation neutre)
       }
       if(subIdx < 0) continue;
       const sfilled = st[subIdx].filled;
@@ -753,8 +816,7 @@ function startTypannotEngine(){
     const L = depthOf(ci);
     for(let k=ci+1;k<CASES.length;k++){
       const ck=CASES[k].kind;
-      if(ck==='ponctuation') break;
-      if(isAnchorKind(ck) && depthOf(k)<=L) break;
+      if(isAnchorKind(ck) && depthOf(k)<=L) break; // seule borne : anchor level <= L
       if(isInteractive(CASES[k]) && CASES[k].kind==='sub variable' && result.st[k].filled) return true;
     }
     return false;
@@ -825,22 +887,14 @@ function startTypannotEngine(){
     }
     let cellToMark = -1;
     let isHole = false;  // trou (manque) -> bleu ; sinon rouge
-    if(errorKind === 'need_subvar'){ cellToMark = errorTarget; isHole = true; }
-    else if(errorKind === 'value_due'){ cellToMark = errorTarget; isHole = true; }
-    else if(errorKind === 'need_subpart'){
-      isHole = true;
-      for(let k=errorTarget-1;k>=0;k--){
-        if(CASES[k].kind==='sub part'){ cellToMark=k; break; }
-        if(CASES[k].kind==='part'){ break; }
-      }
+    // Manques d'ancrage et de bloc : la case à marquer EST errorTarget (missingAnchorFor et la
+    // détection posent déjà la caseIdx de l'ancre/bloc manquant). Générique, aucun niveau nommé.
+    const HOLE_KINDS = ['need_subvar','value_due','need_selection','need_part','need_subpart',
+                        'need_subselection','need_var','need_var_or_subvar'];
+    if(HOLE_KINDS.includes(errorKind)){
+      cellToMark = errorTarget; isHole = true;
     }
-    else if(errorKind === 'need_part'){
-      isHole = true;
-      for(let k=errorTarget-1;k>=0;k--){
-        if(CASES[k].kind==='part'){ cellToMark=k; break; }
-      }
-    }
-    else { cellToMark = errorTarget; }  // no_match -> rouge (faute)
+    else { cellToMark = errorTarget; }  // no_match / wrong_* -> rouge (faute)
     if(cellToMark >= 0){
       if(CASES[cellToMark].span) CASES[cellToMark].span.classList.add(isHole ? 'solcell' : 'errcell');
     }
@@ -920,8 +974,8 @@ function startTypannotEngine(){
       let end = caseIdx;
       for(let k=caseIdx+1;k<CASES.length;k++){
         const kind = CASES[k].kind;
-        // on s'arrête dès qu'on atteint une nouvelle sub variable, sub part, part ou ponctuation
-        if(kind==='sub variable'||kind==='sub part'||kind==='part'||kind==='ponctuation') break;
+        // fin du bloc : nouvelle sub variable OU toute ancre (ponctuation neutre, ignorée)
+        if(kind==='sub variable' || isAnchorKind(kind)) break;
         end = k; // value/variable du même bloc
       }
       return end;
@@ -1201,21 +1255,6 @@ function startTypannotEngine(){
   // Mémoire : dernier placement connu des glyphes interactifs.
   // Map: signature du glyphe orphelin -> nom du doigt où il était placé.
   // On stocke, pour le dernier état VALIDE, la liste {glyph, fingerName, caseIdx}.
-  let lastPlacement = []; // [{srcChar, caseIdx, fingerName, glyph}]
-  function rememberPlacement(result){
-    if(result.errorAt >= 0) return; // ne mémoriser que les états valides
-    const snap = [];
-    result.st.forEach((s,i) => {
-      if(isInteractive(CASES[i]) && s.filled){
-        // trouver le doigt (part) de cette case
-        let fn = null;
-        for(let k=i;k>=0;k--){ if(CASES[k].kind==='part'){ fn=partNameOf(k); break; } }
-        snap.push({srcChar:s.srcChar, caseIdx:i, fingerName:fn, glyph:s.glyph});
-      }
-    });
-    lastPlacement = snap;
-  }
-
   let lastResult = null;        // dernier résultat de validate (pour hover/clavier)
   let lastHoleInfos = [];       // [{rawPos, kind, target}] : chaque ◌ et ce qui le résout
   let prevHoleCount = 0;        // nb de ◌ au rendu précédent (pour détecter une création)
@@ -1395,23 +1434,6 @@ function startTypannotEngine(){
     });
     return {glyphs, posToCase};
   }
-  // Remonter depuis une case : la 1re case 'part' au-dessus, la 1re 'sub part' au-dessus
-  function partCellAbove(caseIdx){
-    // une part n'a pas d'ancre part au-dessus (elle EST le sommet du segment)
-    if(CASES[caseIdx].kind === 'part') return -1;
-    for(let i=caseIdx;i>=0;i--){ if(CASES[i].kind==='part') return i; }
-    return -1;
-  }
-  function subpartCellAbove(caseIdx){
-    // remonter jusqu'à la sub part du MÊME segment. Si on croise une part avant
-    // (ou si la case cliquée est elle-même une part/sub part), pas de sub part parente.
-    if(CASES[caseIdx].kind === 'part') return -1; // une part n'a pas de subpart parente
-    for(let i=caseIdx;i>=0;i--){
-      if(CASES[i].kind==='sub part') return (i===caseIdx ? -1 : i); // la case elle-même n'est pas son ancre
-      if(CASES[i].kind==='part') return -1; // on a atteint la part sans trouver de subpart avant
-    }
-    return -1;
-  }
   // Un glyphe (à une position ordonnée) est-il DÉJÀ présent dans le champ sur la bonne case ?
   function caseAlreadyFilled(caseIdx){
     const glyphs = toGlyphs(inputEl.value);
@@ -1422,25 +1444,8 @@ function startTypannotEngine(){
   // Retire les ancres (part + sub part) d'un segment si plus AUCUN glyphe interactif
   // n'y est rempli. On ne retire une ancre que si aucun autre glyphe ne l'utilise.
   function cleanupOrphanAnchors(refCaseIdx){
-    // localiser la part et la sub part au-dessus de refCaseIdx
-    let partIdx=-1, subpartIdx=-1;
-    for(let i=refCaseIdx;i>=0;i--){
-      if(CASES[i].kind==='sub part'&&subpartIdx<0)subpartIdx=i;
-      if(CASES[i].kind==='part'){partIdx=i;break;}
-    }
-    function segmentHasContent(startIdx, stopKinds){
-      // y a-t-il un glyphe interactif rempli entre startIdx+1 et la prochaine frontière ?
-      const _g = toGlyphs(inputEl.value);
-      const _r = validate(_g, (typeof modelCaseIds==='function'?modelCaseIds():[]));
-      for(let k=startIdx+1;k<CASES.length;k++){
-        const ck=CASES[k].kind;
-        if(stopKinds.indexOf(ck)>=0)break;
-        if(isInteractive(CASES[k]) && _r.st[k].filled) return true;
-      }
-      return false;
-    }
     function removeAnchorGlyph(anchorIdx){
-      // retirer le glyphe fixe de l'ancre (part/subpart) du champ + modèle
+      // retirer le glyphe fixe de l'ancre (quel que soit son niveau) du champ + modèle
       const anchorGlyph = CASES[anchorIdx].fixedGlyph;
       if(!anchorGlyph) return;
       const _g = toGlyphs(inputEl.value);
@@ -1454,13 +1459,16 @@ function startTypannotEngine(){
       raw.splice(rp,1); inputEl.value=raw.join('');
       if(typeof modelRemoveAt==='function'){ modelRemoveAt(s.srcChar); }
     }
-    // 1) la sub part : plus de contenu dans CE segment de subpart -> retirer la subpart
-    if(subpartIdx>=0 && !segmentHasContent(subpartIdx, ['sub part','part','ponctuation'])){
-      removeAnchorGlyph(subpartIdx);
-      // 2) la part : plus AUCUN contenu dans tout le doigt -> retirer la part
-      if(partIdx>=0 && !segmentHasContent(partIdx, ['part','ponctuation'])){
-        removeAnchorGlyph(partIdx);
-      }
+    // GÉNÉRIQUE : remonter TOUTE la colonne d'ancres parentes du bloc, du niveau le plus BAS
+    // (immédiat) au plus HAUT. Retirer chaque ancre dont la sous-arborescence n'a plus aucun
+    // bloc rempli. On s'arrête dès qu'une ancre a encore du contenu (les ancres au-dessus la
+    // couvrent forcément). Aucun niveau nommé : la profondeur de la chaîne décide de tout.
+    const anchors = parentAnchorsBottomUp(refCaseIdx); // [immédiat, ..., plus haut]
+    for(const anchorIdx of anchors){
+      const _g = toGlyphs(inputEl.value);
+      const _r = validate(_g, (typeof modelCaseIds==='function'?modelCaseIds():[]));
+      if(subtreeHasFilledBlock(anchorIdx, _r.st)) break; // encore du contenu -> stop (et au-dessus aussi)
+      removeAnchorGlyph(anchorIdx);
     }
   }
 
@@ -1599,16 +1607,16 @@ function startTypannotEngine(){
       // trouver l'index RAW du premier ◌ dont la value orpheline suivante est du bloc cliqué.
       // On repère les ◌ et on vérifie que la value juste après (dans la séquence filtrée)
       // correspond au bloc de la subvar cliquée.
-      // segment (part+subpart) de la subvar cliquée
+      // signature de bloc UNIVERSELLE : chaîne d'ancres (générique) + la variable au-dessus
+      // (distingue les blocs frères sous une même ancre : flxext / abdadd / rinrex...).
+      // Aucun niveau nommé : on lit la chaîne d'ancrage et le 1er 'variable' rencontré en amont.
       function segmentOf(caseIdx){
-        // bloc = part + subpart + VARIABLE (distingue flxext / abdadd / rinrex)
-        let p=-1,s=-1,v=-1;
+        let v=-1;
         for(let i=caseIdx;i>=0;i--){
-          if(CASES[i].kind==='variable'&&v<0){ v=i; }
-          if(CASES[i].kind==='sub part'&&s<0){ s=i; }
-          if(CASES[i].kind==='part'){ p=i; break; }
+          if(CASES[i].kind==='variable'){ v=i; break; }
+          if(isAnchorKind(CASES[i].kind)) break; // remonté jusqu'à une ancre sans variable
         }
-        return p+'_'+s+'_'+v;
+        return anchorSignature(caseIdx) + '#v' + (v>=0 ? (CASES[v].fixedGlyph||v) : '-');
       }
       const clickedSeg = segmentOf(clickedCaseIdx);
       // Utiliser lastHoleInfos (fiable) : trouver le ◌ dont le TARGET est la subvar cliquée,
@@ -1642,20 +1650,26 @@ function startTypannotEngine(){
         return;
       }
     }
-    // 1. Déterminer les ancres nécessaires : TOUTE la chaîne d'ancres de la case cliquée
-    //    (part, selection, sub part, subselection selon la page). Généralise part+subpart.
+    // 1. Déterminer les ancres nécessaires : TOUTE la chaîne d'ancres de la case cliquée.
+    //    Universel : le SOMMET de branche (niveau le plus haut hors AS) peut être PARTAGÉ par
+    //    plusieurs segments -> on l'injecte seulement si son glyphe est absent du champ. Les
+    //    niveaux plus PROFONDS sont propres à un segment précis -> on les injecte si LEUR case
+    //    n'est pas déjà remplie. Aucun niveau n'est nommé : c'est la profondeur qui décide.
     const toInsert = []; // liste de {glyph, caseIdx}
     const fieldGlyphs = toGlyphs(inputEl.value);
     const chain = CASES[clickedCaseIdx] ? CASES[clickedCaseIdx].anchorChain : [];
+    // niveau du sommet de branche = plus petit level > 0 (l'AS est level 0)
+    let topLevel = Infinity;
+    chain.forEach(a => { if(a.level > 0 && a.level < topLevel) topLevel = a.level; });
     chain.forEach(a => {
+      if(a.level === 0) return; // AS (racine) : jamais injecté comme ancre
       const ag = a.glyph || (CASES[a.caseIdx] ? CASES[a.caseIdx].fixedGlyph : null);
       if(!ag) return;
-      if(a.level === 1){
-        // PART : n'injecter que si son glyphe n'est pas déjà présent (couvre tous ses segments)
+      if(a.level === topLevel){
+        // sommet de branche (potentiellement partagé) : injecter si glyphe absent du champ
         if(!fieldGlyphs.includes(ag)) toInsert.push({glyph: ag, caseIdx: a.caseIdx});
       } else {
-        // selection / sub part / subselection : propres à un segment précis.
-        // n'injecter que si cette case d'ancre n'est pas déjà remplie dans le champ.
+        // niveau propre à un segment : injecter si cette case d'ancre n'est pas déjà remplie
         if(!caseAlreadyFilled(a.caseIdx)) toInsert.push({glyph: ag, caseIdx: a.caseIdx});
       }
     });
@@ -1672,10 +1686,10 @@ function startTypannotEngine(){
       // le bloc = subvar (kind sub variable) + value (kind value) contigües autour du clic
       if(CASES[clickedCaseIdx].kind === 'sub variable'){ subvarCase = clickedCaseIdx; valueCase = clickedCaseIdx + 1; }
       else if(CASES[clickedCaseIdx].kind === 'value'){ valueCase = clickedCaseIdx; subvarCase = clickedCaseIdx - 1; }
-      // la variable fixe juste avant la subvar
+      // la variable fixe juste avant la subvar (s'arrêter à toute ancre, quel que soit son niveau)
       for(let i = (subvarCase>=0?subvarCase:clickedCaseIdx); i >= 0; i--){
         if(CASES[i].kind === 'variable'){ varCase = i; break; }
-        if(CASES[i].kind === 'sub part' || CASES[i].kind === 'part'){ break; }
+        if(isAnchorKind(CASES[i].kind)){ break; }
       }
       if(varCase >= 0 && CASES[varCase].fixedGlyph && !caseAlreadyFilled(varCase)){
         toInsert.push({glyph: CASES[varCase].fixedGlyph, caseIdx: varCase});
@@ -1685,31 +1699,12 @@ function startTypannotEngine(){
       // bloc value du même segment (part+subpart). On cherche donc la value orpheline/remplie
       // du même segment que le bloc cliqué, où qu'elle soit dans st.
       if(valueCase >= 0){
-        // segment (part+subpart) du bloc cliqué
-        function segOfCase(ci){
-          // bloc = part + subpart + VARIABLE (distingue flxext / abdadd / rinrex)
-          let p=-1,s=-1,v=-1;
-          for(let i=ci;i>=0;i--){
-            if(CASES[i].kind==='variable'&&v<0){ v=i; }
-            if(CASES[i].kind==='sub part'&&s<0){ s=i; }
-            if(CASES[i].kind==='part'){ p=i; break; }
-          }
-          return p+'_'+s+'_'+v;
-        }
-        const targetSeg = segOfCase(valueCase);
-        // part+subpart (SANS variable) pour repérer un full ambigu débordé sur un autre bloc
-        function partSubOf(ci){
-          let p=-1,s=-1;
-          for(let i=ci;i>=0;i--){ if(CASES[i].kind==='sub part'&&s<0){s=i;} if(CASES[i].kind==='part'){p=i;break;} }
-          return p+'_'+s;
-        }
-        const targetPartSub = partSubOf(valueCase);
         const curG = toGlyphs(inputEl.value);
         const curR = validate(curG, (typeof modelCaseIds==='function'?modelCaseIds():[]));
         let victimSrcChar = -1;
-        // Retirer UNIQUEMENT la value du BLOC cliqué (même variable). Depuis que le validateur
-        // place via les recs (caseId), il n'y a plus de "full ambigu débordé" à rattraper dans
-        // un autre bloc : chaque value est déjà dans son bloc. On ne touche donc jamais un autre bloc.
+        // Retirer UNIQUEMENT la value du BLOC cliqué. Depuis que le validateur place via les recs
+        // (caseId), chaque value est déjà dans son bloc : on lit directement la value du bloc
+        // cliqué (valueCase), aucun repérage de segment nommé n'est nécessaire.
         const exSelf = curR.st[valueCase];
         if(exSelf && (exSelf.filled || exSelf.orphan) && exSelf.srcChar >= 0){
           victimSrcChar = exSelf.srcChar;
