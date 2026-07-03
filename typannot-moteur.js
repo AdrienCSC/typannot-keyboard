@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.11 (vocabulaire d'ancrage purge des regles: raisonnement par niveaux relatifs via primitives anchorChain)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.12 (Table 1 HIERARCHIE anchor levels corrigee par page ; funnels Table 2 a venir)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -87,16 +87,28 @@ function startTypannotEngine(){
   //
   // Une branche est écrite du SOMMET (racine d'ancrage) vers le bas (juste au-dessus de la
   // var/subvar). L'AS est racine implicite de plus haut niveau, au-dessus de toute branche.
+  // ===== TABLE 1 — HIÉRARCHIE des anchor levels par page =====
+  // L'ordre d'emboîtement des niveaux, du plus HAUT (A1, sous l'AS) au plus BAS. Sert à calculer
+  // les anchor levels (A1/A2/A3...), la chaîne d'ancrage et la cascade. C'est PUREMENT la
+  // hiérarchie « qui est sous qui » — RIEN à voir avec les funnels (Table 2, restrictions de
+  // possibilités). Une page = une seule chaîne d'emboîtement. Les niveaux absents sur un cas
+  // précis (ex : jaw n'a pas de subpart) se déduisent de la formule (P03), pas de la table.
+  const ANCHOR_HIERARCHY = {
+    finger:      ['selection','part','sub part'],
+    'upper-limb':['selection','part'],
+    body:        ['part','selection'],
+    lowerface:   ['part','sub part','subselection'],
+    upperface:   ['part','selection','sub part','subselection'],
+  };
+  // compat : le reste du code lit ANCHOR_BRANCHES comme liste de branches. La hiérarchie est
+  // une chaîne unique -> on l'expose comme une branche unique pour construire les relations
+  // parent->enfant (ANCHOR_PARENTS). Les funnels (Table 2) seront traités séparément.
   const ANCHOR_BRANCHES = {
-    finger:     [ ['selection','part','sub part'] ],
-    body:       [ ['part','selection'] ],
-    'upper-limb':[ ['selection','part'] ],
-    lowerface:  [ ['sub part','subselection'],            // A: sommet subpart
-                  ['part'] ],                              // B: sommet part
-    upperface:  [ ['selection','sub part','subselection'],// A: sommet selection (eyelid)
-                  ['sub part'],                            // B: sommet subpart (non-eyelid)
-                  ['part','selection'],                    // C: sommet part
-                  ['part'] ],                              // D: sommet part
+    finger:      [ ANCHOR_HIERARCHY.finger ],
+    'upper-limb':[ ANCHOR_HIERARCHY['upper-limb'] ],
+    body:        [ ANCHOR_HIERARCHY.body ],
+    lowerface:   [ ANCHOR_HIERARCHY.lowerface ],
+    upperface:   [ ANCHOR_HIERARCHY.upperface ],
   };
   function detectPage(){
     const t = (document.title||'').toLowerCase();
