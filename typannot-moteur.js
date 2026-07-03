@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.12 (Table 1 HIERARCHIE anchor levels corrigee par page ; funnels Table 2 a venir)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.14 (cascade: regle du caractere - traverse une ancre de meme niveau si meme glyphe, ex lips repete)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -100,9 +100,17 @@ function startTypannotEngine(){
     lowerface:   ['part','sub part','subselection'],
     upperface:   ['part','selection','sub part','subselection'],
   };
-  // compat : le reste du code lit ANCHOR_BRANCHES comme liste de branches. La hiérarchie est
-  // une chaîne unique -> on l'expose comme une branche unique pour construire les relations
-  // parent->enfant (ANCHOR_PARENTS). Les funnels (Table 2) seront traités séparément.
+  // ===== TABLE 3 — SKIP : niveaux ancrants SKIPABLES par page ===== (voir après detectPage)
+  const ANCHOR_SKIPPABLE = {
+    finger:      ['selection'],
+    'upper-limb':[],
+    body:        [],
+    lowerface:   [],
+    upperface:   [],
+  };
+
+  // La hiérarchie (chaîne unique) exposée comme branche unique pour construire les relations
+  // parent->enfant (ANCHOR_PARENTS).
   const ANCHOR_BRANCHES = {
     finger:      [ ANCHOR_HIERARCHY.finger ],
     'upper-limb':[ ANCHOR_HIERARCHY['upper-limb'] ],
@@ -121,6 +129,9 @@ function startTypannotEngine(){
   }
   const PAGE = detectPage();
   const PAGE_BRANCHES = ANCHOR_BRANCHES[PAGE] || ANCHOR_BRANCHES.finger;
+  // niveaux skipables de la page courante (Table 3)
+  const SKIP_SET = new Set(ANCHOR_SKIPPABLE[PAGE] || []);
+  function isSkippableKind(kind){ return SKIP_SET.has(kind); }
 
   // Relations parent->enfant autorisées, extraites des branches R01c de la page. Un même kind
   // peut avoir des parents différents selon la branche (upperface : selection est enfant de part
@@ -376,16 +387,31 @@ function startTypannotEngine(){
       return c.anchorChain ? c.anchorChain.length : 0;
     }
     function anchorLevelAt(i){ return depthAt(i); }
-    // PORTÉE d'une ancre (case anchorIdx) = de la case suivante jusqu'à (exclue) la prochaine
-    // ANCRE de niveau <= celui de anchorIdx (on sort de sa sous-arborescence), ou la fin.
-    // La ponctuation est neutre (repère visuel) : elle ne borne rien. Tout est anchor level.
+    // Frontière de portée d'une ancre (case anchorIdx), avec la règle du CARACTÈRE :
+    //  - une ancre de niveau STRICTEMENT plus haut (depth < L) : on est sorti vers le haut -> break.
+    //  - une ancre de MÊME niveau (depth == L) : break SEULEMENT si son caractère DIFFÈRE de
+    //    l'ancre de départ. Même caractère = même ancre fragmentée (ex lips répété par subpart)
+    //    -> on TRAVERSE. Caractère différent (ex jaw) = autre ancre -> break.
+    //  - une ancre plus BASSE (depth > L) : sous-arborescence -> on continue.
+    // La ponctuation est neutre. Tout est anchor level + comparaison de glyphe au même niveau.
+    function isScopeBoundary(anchorIdx, k, L){
+      if(!isAnchorKind(CASES[k].kind)) return false;
+      const dk = depthAt(k);
+      if(dk < L) return true;                       // remonté au-dessus -> frontière
+      if(dk === L){                                 // même niveau : dépend du caractère
+        const gStart = CASES[anchorIdx].fixedGlyph;
+        const gHere  = CASES[k].fixedGlyph;
+        return gHere !== gStart;                    // caractère différent -> frontière ; même -> traverse
+      }
+      return false;                                 // plus bas -> dans la sous-arborescence
+    }
     function blocksUnderAnchor(anchorIdx){
       const L=depthAt(anchorIdx);
       if(L===0) return [];
       const blocks=[];
       for(let k=anchorIdx+1;k<CASES.length;k++){
+        if(isScopeBoundary(anchorIdx, k, L)) break;
         const ck=CASES[k].kind;
-        if(isAnchorKind(ck) && depthAt(k)<=L) break; // frontière : sorti de la sous-arborescence
         if(ck==='sub variable'&&isInteractive(CASES[k])) blocks.push({sub:k,val:null});
         if(ck==='value'&&isInteractive(CASES[k])&&blocks.length){
           const last=blocks[blocks.length-1];
@@ -399,8 +425,7 @@ function startTypannotEngine(){
       const L=depthAt(anchorIdx);
       let last=anchorIdx;
       for(let k=anchorIdx+1;k<CASES.length;k++){
-        const ck=CASES[k].kind;
-        if(isAnchorKind(ck) && depthAt(k)<=L) break;
+        if(isScopeBoundary(anchorIdx, k, L)) break;
         last=k;
       }
       return last;
@@ -465,6 +490,7 @@ function startTypannotEngine(){
         for(const link of chain){
           if(link.kind === 'as') continue;               // AS = racine, pas un manque
           if(!isAnchorKind(link.kind)) continue;
+          if(isSkippableKind(link.kind)) continue;        // niveau SKIPABLE : jamais réclamé
           if(!anchorPosed(link.caseIdx)){
             return { kind: needKindOf(link.kind), caseIdx: link.caseIdx };
           }
