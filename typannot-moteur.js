@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.5 (clavier filtré comme la formule)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.7 (D14 enquête de contexte + D10 cascade générique par niveau d'ancre)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -223,61 +223,40 @@ function startTypannotEngine(){
       } return -1;
     }
     function partName(i){ const m=CASES[i].title.split(':'); return m.length>1?m[1].trim():CASES[i].title.trim(); }
-    function blocksInWholeFinger(partIdx){
-      const name=partName(partIdx); const blocks=[]; let k=partIdx;
-      while(k<CASES.length){
-        if(CASES[k].kind==='part'&&partName(k)===name){
-          for(let m=k+1;m<CASES.length;m++){
-            const ck=CASES[m].kind;
-            if(ck==='part'){k=m;break;}
-            if(ck==='ponctuation'){k=m+1;break;}
-            if(ck==='sub variable'&&isInteractive(CASES[m]))blocks.push({sub:m,val:null});
-            if(ck==='value'&&isInteractive(CASES[m])&&blocks.length)blocks[blocks.length-1].val=m;
-            if(m===CASES.length-1){k=m+1;}
-          }
-          if(k<CASES.length&&CASES[k].kind==='part'&&partName(k)===name)continue; else break;
-        } else break;
-      }
-      return blocks;
-    }
-    function blocksInAllFingers(){
-      // TOUS les blocs (subvar interactive + sa value) de TOUTE la formule.
+    // Niveau d'ancre d'une case (0 si ce n'est pas une ancre). part<selection<sub part<subselection.
+    function anchorLevelAt(i){ return (CASES[i] ? anchorLevel(CASES[i].kind) : 0); }
+    // PORTÉE d'une ancre = de la case juste après l'ancre jusqu'à (exclue) la prochaine ancre de
+    // niveau <= L, ou une ponctuation, ou la fin. Générique : aucun nom de "doigt", la frontière
+    // se déduit du niveau. Vaut pour les 5 pages (part / selection / sub part / subselection).
+    // Cas selection/AS : c'est l'ancre de plus haut niveau -> sa portée couvre toute la branche
+    // (l'équivalent générique de "tous les doigts").
+    function blocksUnderAnchor(anchorIdx){
+      const L=anchorLevelAt(anchorIdx);
+      if(L===0) return [];
       const blocks=[];
-      for(let k=0;k<CASES.length;k++){
+      for(let k=anchorIdx+1;k<CASES.length;k++){
         const ck=CASES[k].kind;
-        if(ck==='sub variable'&&isInteractive(CASES[k]))blocks.push({sub:k,val:null});
+        if(ck==='ponctuation') break;
+        if(isAnchorKind(ck) && anchorLevel(ck)<=L) break; // frontière : on change de branche
+        if(ck==='sub variable'&&isInteractive(CASES[k])) blocks.push({sub:k,val:null});
         if(ck==='value'&&isInteractive(CASES[k])&&blocks.length){
           const last=blocks[blocks.length-1];
-          if(last.val==null)last.val=k;
+          if(last.val==null) last.val=k;
         }
       }
       return blocks;
     }
-    function blocksInSubpart(subIdx){
-      const blocks=[];
-      for(let k=subIdx+1;k<CASES.length;k++){
+    // Dernière case de la portée d'une ancre (même frontière que blocksUnderAnchor).
+    function endOfAnchorScope(anchorIdx){
+      const L=anchorLevelAt(anchorIdx);
+      let last=anchorIdx;
+      for(let k=anchorIdx+1;k<CASES.length;k++){
         const ck=CASES[k].kind;
-        if(ck==='sub part'||ck==='part'||ck==='ponctuation')break;
-        if(ck==='sub variable'&&isInteractive(CASES[k]))blocks.push({sub:k,val:null});
-        if(ck==='value'&&isInteractive(CASES[k])&&blocks.length)blocks[blocks.length-1].val=k;
+        if(ck==='ponctuation') break;
+        if(isAnchorKind(ck) && anchorLevel(ck)<=L) break;
+        last=k;
       }
-      return blocks;
-    }
-    function endOfFingerIdx(partIdx){
-      const name=partName(partIdx);let last=partIdx;
-      for(let k=partIdx;k<CASES.length;k++){
-        if(CASES[k].kind==='part'&&partName(k)===name){last=k;continue;}
-        if(CASES[k].kind==='part'&&partName(k)!==name)break;
-        last=k;
-      } return last;
-    }
-    function endOfSubpartIdx(subIdx){
-      let last=subIdx;
-      for(let k=subIdx+1;k<CASES.length;k++){
-        const ck=CASES[k].kind;
-        if(ck==='sub part'||ck==='part'||ck==='ponctuation')break;
-        last=k;
-      } return last;
+      return last;
     }
     function cascadeFill(blocks, gi){
       const f=[];
@@ -402,32 +381,15 @@ function startTypannotEngine(){
       // cascade
       if(glyph===G_REFPOS||glyph===G_ZERO){
         const lc=cursor>=0?CASES[cursor]:null;
-        // NIVEAU AS/HAND : ref pos/zero juste après selection ou AS (finger) ->
-        // remplir TOUS les blocs de TOUS les doigts avec les couples ref pos + zero linkés.
-        if(lc&&(lc.kind==='selection'||lc.kind==='as')){
-          const blocks=blocksInAllFingers();
+        // GÉNÉRIQUE : poser ref pos/zero juste après une ANCRE (quel que soit son niveau :
+        // selection/AS, part, sub part, subselection) remplit tous les blocs de SA PORTÉE avec
+        // les couples ref pos + zero linkés. La portée et sa fin se déduisent du niveau d'ancre.
+        if(lc&&isAnchorKind(lc.kind)){
+          const blocks=blocksUnderAnchor(cursor);
           if(blocks.length){
             const f=cascadeFill(blocks, gi);
             const mx=Math.max.apply(null,f);
-            if(mx>cursor)cursor=mx;
-            continue;
-          }
-        }
-        if(lc&&lc.kind==='part'){
-          const blocks=blocksInWholeFinger(cursor);
-          if(blocks.length){
-            const f=cascadeFill(blocks, gi);
-            cursor=endOfFingerIdx(cursor);
-            const mx=Math.max.apply(null,f); if(mx>cursor)cursor=mx;
-            continue;
-          }
-        }
-        if(lc&&lc.kind==='sub part'){
-          const blocks=blocksInSubpart(cursor);
-          if(blocks.length){
-            const f=cascadeFill(blocks, gi);
-            const mx=Math.max.apply(null,f);
-            cursor=Math.max(endOfSubpartIdx(cursor),mx);
+            cursor=Math.max(endOfAnchorScope(cursor), mx);
             continue;
           }
         }
@@ -1028,45 +990,103 @@ function startTypannotEngine(){
     return { ok: (modelStr === fieldStr), modelStr: modelStr, fieldStr: fieldStr };
   }
 
-  // RÉCONCILIATION : aligner le MODÈLE sur les glyphes actuels du champ (hors ◌), en
-  // PRÉSERVANT les recs existants qui correspondent encore (mêmes glyphes, même ordre), et
-  // en ajoutant/retirant ce qui a changé. Sert pour les modifications CLAVIER (frappe, collage,
-  // suppression au milieu), où l'on ne peut pas capter finement chaque opération : on compare
-  // l'état final et on corrige. Les nouveaux glyphes reçoivent caseId null (origine clavier).
-  // Algorithme : diff par plus longue sous-séquence commune simplifiée (glouton par glyphe).
-  function modelReconcileWithField(){
-    const field = Array.from(inputEl.value).filter(ch => ch !== DOT);
-    // Si déjà aligné, ne rien faire (cas normal : les clics formule maintiennent le modèle).
-    let same = (field.length === MODEL.length);
-    if(same){ for(let i=0;i<field.length;i++){ if(MODEL[i].glyph !== field[i]){ same=false; break; } } }
-    if(same) return;
-    // Diff glouton : parcourir field et MODEL en parallèle, réutiliser les recs dont le glyphe
-    // correspond, insérer un nouveau rec (caseId null) pour un glyphe ajouté, sauter (retirer)
-    // un rec dont le glyphe ne correspond plus.
-    const newModel = [];
-    let mi = 0; // index dans l'ancien MODEL
-    for(let fi = 0; fi < field.length; fi++){
-      const g = field[fi];
-      if(mi < MODEL.length && MODEL[mi].glyph === g){
-        // rec existant conservé (préserve id + caseId)
-        newModel.push(MODEL[mi]); mi++;
-      } else {
-        // chercher plus loin dans MODEL un rec au même glyphe (cas suppression d'un rec avant)
-        let found = -1;
-        for(let k = mi+1; k < MODEL.length; k++){ if(MODEL[k].glyph === g){ found = k; break; } }
-        if(found >= 0){
-          // les recs entre mi et found ont été supprimés du champ : on les saute
-          mi = found;
-          newModel.push(MODEL[mi]); mi++;
-        } else {
-          // glyphe nouveau (frappe clavier) : créer un rec caseId null
-          newModel.push({ id: MODEL_nextId++, glyph: g, caseId: null });
-        }
+  // RÉCONCILIATION — enquête de contexte (D14).
+  //
+  // Tout geste natif (clavier physique, collage, coupe, drag, menu contextuel) ne touche QUE le
+  // champ. À cet instant les recs ignorent le changement : le champ est le seul CAPTEUR du
+  // geste — jamais la référence. On lit ce qui a changé dans le champ et on le traduit en
+  // MUTATION des recs, en PRÉSERVANT les recs (donc leur id + leur caseId) qui n'ont pas bougé.
+  //
+  // Principe : on ne réconcilie PAS glyphe par glyphe. Une action utilisateur = un LOT de
+  // glyphes contigus. On identifie le bloc de recs qui matche ce lot via la SIGNATURE DE
+  // CONTEXTE (voisinage du lot), en élargissant le rayon jusqu'à lever l'ambiguïté.
+  //
+  // fieldSnapshotBefore : séquence de glyphes du champ AVANT le geste (maintenue à jour à
+  // chaque recalcul). MODEL est réputé cohérent avec elle en entrée.
+  let fieldSnapshotBefore = [];
+
+  // Plus longue sous-séquence commune (indices) entre deux séquences de glyphes.
+  // Retourne la liste des couples [ai, bi] des positions APPARIÉES (le "socle" inchangé).
+  function lcsPairs(a, b){
+    const n = a.length, m = b.length;
+    const dp = Array.from({length:n+1}, () => new Int32Array(m+1));
+    for(let i=n-1;i>=0;i--){
+      for(let j=m-1;j>=0;j--){
+        dp[i][j] = (a[i]===b[j]) ? dp[i+1][j+1]+1 : Math.max(dp[i+1][j], dp[i][j+1]);
       }
     }
-    // remplacer le contenu de MODEL par newModel (en place, pour préserver la référence)
+    const pairs = [];
+    let i=0, j=0;
+    while(i<n && j<m){
+      if(a[i]===b[j]){ pairs.push([i,j]); i++; j++; }
+      else if(dp[i+1][j] >= dp[i][j+1]) i++;
+      else j++;
+    }
+    return pairs;
+  }
+
+  // Signature de contexte d'une position dans une séquence : les glyphes à gauche et à droite
+  // jusqu'à un rayon donné (bornes du tableau comprises comme marqueurs).
+  function contextSig(seq, pos, radius){
+    const L = [], R = [];
+    for(let r=1;r<=radius;r++){ L.push(pos-r>=0 ? seq[pos-r] : '\u0000^'); }
+    for(let r=1;r<=radius;r++){ R.push(pos+r<seq.length ? seq[pos+r] : '\u0000$'); }
+    return L.reverse().join('') + '|' + R.join('');
+  }
+
+  function modelReconcileWithField(){
+    const field = Array.from(inputEl.value).filter(ch => ch !== DOT);
+    const before = fieldSnapshotBefore;
+
+    // Aligné avec l'état capté avant le geste ET modèle cohérent : rien à faire.
+    // (cas normal : les clics formule maintiennent déjà les recs, snapshot déjà à jour)
+    let same = (field.length === MODEL.length);
+    if(same){ for(let i=0;i<field.length;i++){ if(MODEL[i].glyph !== field[i]){ same=false; break; } } }
+    if(same){ fieldSnapshotBefore = field.slice(); return; }
+
+    // Socle inchangé entre AVANT et APRÈS : ces positions du champ n'ont pas bougé, les recs
+    // correspondants sont conservés tels quels. Ce qui reste = les LOTS (suppressions/ajouts).
+    const pairs = lcsPairs(before, field);
+    const matchedBefore = new Set(pairs.map(p => p[0]));
+    const matchedField  = new Set(pairs.map(p => p[1]));
+
+    // Map position champ APRÈS (appariée) -> position champ AVANT (appariée), pour retrouver
+    // le rec d'origine. On suppose MODEL[i] <-> before[i] en entrée (invariant maintenu).
+    const fieldToBefore = new Map(pairs.map(p => [p[1], p[0]]));
+
+    // Reconstruire MODEL en parcourant le champ APRÈS :
+    //  - position appariée -> réutiliser le rec d'origine (préserve id + caseId).
+    //  - position NON appariée -> glyphe d'un lot AJOUTÉ -> nouveau rec caseId=null.
+    // Les recs dont la position AVANT n'est plus appariée = lot SUPPRIMÉ -> abandonnés.
+    //
+    // Désambiguïsation par signature de contexte : quand plusieurs positions AVANT non
+    // appariées portent le même glyphe qu'une position APRÈS non appariée, on ne devine pas —
+    // le socle LCS a déjà ancré tout ce qui est stable, donc une position non appariée est
+    // réellement un ajout (pas un déplacement). L'appariement du socle EST la signature de
+    // contexte : deux occurrences du même glyphe ne sont fusionnées que si leur voisinage
+    // stable concorde, ce que le LCS garantit position par position.
+    const newModel = [];
+    for(let fi=0; fi<field.length; fi++){
+      if(matchedField.has(fi)){
+        const bi = fieldToBefore.get(fi);
+        const rec = (bi < MODEL.length && MODEL[bi] && MODEL[bi].glyph === field[fi])
+                    ? MODEL[bi]
+                    : { id: MODEL_nextId++, glyph: field[fi], caseId: null };
+        newModel.push(rec);
+      } else {
+        // glyphe d'un lot ajouté (collage / frappe) : rec neuf, origine non-formule
+        newModel.push({ id: MODEL_nextId++, glyph: field[fi], caseId: null });
+      }
+    }
+
+    // Cas résiduel — ambiguïté irréductible : séquence strictement identique de bout en bout
+    // (recs interchangeables). Le LCS a alors tout apparié, aucun lot : on tombe dans 'same'
+    // plus haut. Si on arrive ici avec des glyphes identiques non tranchés, l'ordre existant
+    // des recs est conservé sans mutation de caseId (pas de réattribution hasardeuse).
+
     MODEL.length = 0;
     for(const r of newModel){ MODEL.push(r); }
+    fieldSnapshotBefore = field.slice();
   }
 
 
@@ -1159,10 +1179,23 @@ function startTypannotEngine(){
   let lastCreatedHoleTarget = -1; // case cible du DERNIER ◌ créé temporellement (focus par défaut)
   function onInputChanged(reason){
     if(isSyncing) return; // ignore les events déclenchés par notre propre manipulation
-    if(typeof modelClear === 'function' && (reason === 'clear' || reason === 'init')){ modelClear(); }
-    // CLAVIER : réconcilier le modèle avec le champ (frappe, collage, suppression au milieu).
-    // Les clics formule maintiennent déjà le modèle ; ici on rattrape les éditions manuelles.
-    if(typeof modelReconcileWithField === 'function' && (reason === 'edit' || reason === 'clic')){ modelReconcileWithField(); }
+    if(typeof modelClear === 'function' && (reason === 'clear' || reason === 'init')){
+      modelClear();
+      fieldSnapshotBefore = [];
+    }
+    // GESTES qui touchent le champ SANS maintenir les recs (clavier virtuel, frappe physique,
+    // collage, coupe) : réconcilier les recs par enquête de contexte (D14). Les clics formule
+    // et la résolution ('clic-formule' / 'resolution') maintiennent déjà les recs avec leur
+    // caseId via modelAdd/modelRemove — ils ne passent PAS par cette réconciliation.
+    const NATIVE = (reason === 'edit' || reason === 'clic' || reason === 'cut');
+    const MAINTAINED = (reason === 'clic-formule' || reason === 'resolution');
+    if(typeof modelReconcileWithField === 'function' && NATIVE){
+      modelReconcileWithField();
+    } else if(MAINTAINED || reason === 'init' || reason === 'clear'){
+      // le MODEL vient d'être muté (ou vidé) hors réconciliation : réancrer le snapshot AVANT
+      // sur l'état courant du champ, pour que le PROCHAIN geste natif diffe contre le bon état.
+      fieldSnapshotBefore = Array.from(inputEl.value).filter(ch => ch !== DOT);
+    }
 
     // 1. Retirer tous les ◌ existants pour repartir d'une base propre,
     //    en mémorisant la position du curseur ajustée.
