@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.22 (REECRITURE MAJEURE: le validateur est un ALIGNEUR st<->formule. La formule de chaque page EST la spec grammaticale unique. Toutes les regles emergent du diff st/formule, plus aucune logique procedurale glouton. findForward legacy conserve mais inactif)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.24 (PRIORITE VALUE->SUBVAR en bout de ligne: une value reclame d abord sa subvar cran par cran - remontee ascendante du stream pour desambiguiser au lieu d exiger toute la colonne d ancrage d un coup. value seule -> need_var_or_subvar SEUL, pas need_part+need_subpart)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -389,10 +389,20 @@ function startTypannotEngine(){
     }
     return '?';
   }
-  // Une case-ancre est-elle "posée" dans st ? (son glyphe fixe présent = typed/filled). Sert à
-  // vérifier que la colonne d'ancrage d'une case cible est satisfaite en amont.
+  // Une case-ancre est-elle "posée" dans st ? RÈGLE DU CARACTÈRE : deux ancres de MÊME GLYPHE
+  // sont la même ancre (la formule fragmente une ancre en plusieurs occurrences ; ex nose
+  // apparaît 2× sur upper face, lips 4× sur lower face). Donc l'ancre @anchorCaseIdx est
+  // satisfaite si SON glyphe est posé sur N'IMPORTE laquelle de ses occurrences.
   function anchorSatisfiedInSt(anchorCaseIdx, st){
-    return !!(st[anchorCaseIdx] && (st[anchorCaseIdx].typed || st[anchorCaseIdx].filled));
+    const g = CASES[anchorCaseIdx] && CASES[anchorCaseIdx].fixedGlyph;
+    if(g == null){
+      return !!(st[anchorCaseIdx] && (st[anchorCaseIdx].typed || st[anchorCaseIdx].filled));
+    }
+    // chercher une occurrence de même glyphe posée
+    for(let j=0;j<CASES.length;j++){
+      if(CASES[j].fixedGlyph === g && st[j] && (st[j].typed || st[j].filled)) return true;
+    }
+    return false;
   }
   // Toutes les ancres obligatoires (non skipables, hors AS) de la chaîne d'une case sont-elles
   // satisfaites dans st ? Retourne la 1re ancre manquante {caseIdx, kind} ou null si tout est là.
@@ -434,6 +444,9 @@ function startTypannotEngine(){
         if(!isAnchorKind(c.kind) || c.kind==='as') continue;
         if(isSkippableKind(c.kind)) continue;
         if(st[k].typed || st[k].filled) continue;
+        // RÈGLE DU CARACTÈRE : si le glyphe de cette ancre est déjà posé ailleurs, elle est
+        // satisfaite -> ne pas la réclamer.
+        if(anchorSatisfiedInSt(k, st)) continue;
         // cette ancre obligatoire est sautée ET fait partie de la chaîne de toCase ?
         const chain = (CASES[toCase] && CASES[toCase].anchorChain) || [];
         const inChain = chain.some(a => a.caseIdx === k);
@@ -501,21 +514,10 @@ function startTypannotEngine(){
       // 2. REC SANS caseId (glyphe CLAVIER) -> chercher la prochaine case compatible EN AVANT.
       const cell = nextMatchingCase(glyph, gk);
       if(cell){
-        // ancres obligatoires sautées entre cursor et la cible -> trous need_
-        flagSkippedAnchors(cursor, cell.idx, gi);
-        // vérifier que la colonne d'ancrage de la cible est satisfaite (une ancre plus haute
-        // pourrait manquer même hors de l'intervalle) ; sinon need_ + NE PAS placer (glyphe sauvage).
-        const miss = firstMissingAnchor(cell.idx, st);
-        if(miss){
-          // glyphe sauvage : son ancre manque -> on émet le manque, on ne place pas.
-          if(!errors.some(e => e.target === miss.caseIdx)){
-            errors.push({at:gi, kind:needKindOfAnchor(miss.kind), target:miss.caseIdx});
-          }
-          continue;
-        }
-        // R03/R02b — une VALUE cible exige sa SUBVAR amont (case sub variable du même bloc, juste
-        // avant). Absente/undefined + vraie value -> manque var/subvar (kind selon skip). Sauvage :
-        // on NE place pas.
+        // PRIORITÉ VALUE (R03/R02b) : une value réclame sa SUBVAR (cran juste au-dessus) AVANT
+        // toute remontée d'ancrage. On est en bout de ligne : la seule façon de désambiguïser une
+        // value est de remonter cran par cran (d'abord subvar, puis au-dessus si encore ambigu).
+        // On ne réclame PAS encore les ancres sautées : la subvar est le 1er cran.
         if(CASES[cell.idx].kind==='value' && !cell.undef){
           const subIdx = cell.idx - 1;
           const subOK = CASES[subIdx] && CASES[subIdx].kind==='sub variable' && st[subIdx].filled && !st[subIdx].isUndef;
@@ -529,8 +531,20 @@ function startTypannotEngine(){
             else if(varSkippable) e = {at:gi, kind:'need_var_or_subvar', target:subIdx, altTarget:varIdx};
             else e = {at:gi, kind:'need_var', target:(varIdx>=0?varIdx:subIdx)};
             if(!errors.some(x => x.target === e.target && x.kind === e.kind)) errors.push(e);
-            continue;
+            continue; // value sauvage : on ne place pas ; la subvar est le 1er cran réclamé
           }
+        }
+
+        // ancres obligatoires sautées entre cursor et la cible -> trous need_ (seulement une fois
+        // qu'on ne bloque plus sur la subvar).
+        flagSkippedAnchors(cursor, cell.idx, gi);
+        // colonne d'ancrage de la cible satisfaite ? sinon need_ + NE PAS placer (sauvage).
+        const miss = firstMissingAnchor(cell.idx, st);
+        if(miss){
+          if(!errors.some(e => e.target === miss.caseIdx)){
+            errors.push({at:gi, kind:needKindOfAnchor(miss.kind), target:miss.caseIdx});
+          }
+          continue;
         }
         place(cell.idx, glyph, gi, cell.undef);
         cursor = cell.idx;
