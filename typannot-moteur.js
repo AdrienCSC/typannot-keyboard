@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.19 (SYNTAXE complete: R02 wrong_kind/wrong_membre/no_match, R02b need_var_or_subvar, R00b posture tete, R12 ordre, R14 var skipable)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.20 (fix rendu: TOUS les need_* generent un ◌ dans le champ - need_var_or_subvar/need_var/need_selection/need_subselection etaient oublies)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -1478,10 +1478,14 @@ function startTypannotEngine(){
     result._glyphs = glyphs;
 
     // 3. Déterminer TOUTES les positions de trou (une par erreur structurelle "manque").
+    // Tout kind need_* (manque à combler) + value_due génère un ◌. Les fautes (wrong_*, no_match,
+    // abandoned) ne génèrent PAS de ◌ (rien à insérer, c'est à corriger/retirer -> rouge).
+    const HOLE_KINDS_DOT = ['need_part','need_subpart','need_selection','need_subselection',
+                            'need_subvar','need_var','need_var_or_subvar','value_due'];
     const holePositions = [];
     const allErrs = result.errors || (result.errorAt >= 0 ? [{at:result.errorAt, kind:result.errorKind}] : []);
     allErrs.forEach(e => {
-      const isHole = ['need_part','need_subpart','need_subvar','value_due'].includes(e.kind);
+      const isHole = HOLE_KINDS_DOT.includes(e.kind) && !e.abandoned; // abandoned = faute, pas trou
       if(isHole) holePositions.push(e.at);
     });
 
@@ -1505,7 +1509,7 @@ function startTypannotEngine(){
     lastHoleInfos = [];
     {
       // map : position filtrée du ◌ -> erreur (kind, target)
-      const holeErrs = (result.errors||[]).filter(e => ['need_part','need_subpart','need_subvar','value_due'].includes(e.kind));
+      const holeErrs = (result.errors||[]).filter(e => HOLE_KINDS_DOT.includes(e.kind) && !e.abandoned);
       // recalculer les positions RAW des ◌ dans newValue
       const rawArr = Array.from(newValue);
       let filteredIdx = 0, hi = 0;
