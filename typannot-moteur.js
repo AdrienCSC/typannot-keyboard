@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.21 (fix rendu champ: TOUS les wrong_* + abandoned colores rouge sur le glyphe dans le champ - seuls no_match/bad_value l etaient, donc R00b/R02/R08b invisibles)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.22 (REECRITURE MAJEURE: le validateur est un ALIGNEUR st<->formule. La formule de chaque page EST la spec grammaticale unique. Toutes les regles emergent du diff st/formule, plus aucune logique procedurale glouton. findForward legacy conserve mais inactif)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -347,7 +347,317 @@ function startTypannotEngine(){
   function log(m){ if(!logEl) return; logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; }
 
   // ---------- LE VALIDATEUR : rejoue une séquence, renvoie l'état ----------
+  // ============================================================================
+  // ALIGNEUR st ↔ FORMULE — LE moteur de vérité. La formule de la page (séquence de cases,
+  // chacune portant kind + anchorChain + glyphes acceptés + skip) EST la spécification
+  // grammaticale. Le validateur ne code AUCUNE règle : il aligne les recs (st) sur la séquence
+  // de cases et détecte où st DIVERGE de la formule. Toutes les règles (ordre, doublon, ancrage,
+  // abandon, glyphe sauvage) ÉMERGENT de cet alignement. Erreurs ET résolutions = deux lectures
+  // du même diff. Universel : rien de spécifique à une page, tout est lu depuis les CASES.
+  // ----------------------------------------------------------------------------
+
+  // Une case accepte-t-elle ce glyphe ? (LE SHEET : fixedGlyph absolu OU une option dataOptions).
+  // undefined est accepté partout où il y a une option 'undefined'. C'est la 2e source de vérité.
+  function caseAccepts(caseIdx, glyph){
+    const c = CASES[caseIdx];
+    if(!c) return false;
+    if(c.fixedGlyph != null) return c.fixedGlyph === glyph;
+    if(c.dataOptions){
+      const opts = GROUPS[c.dataOptions] || [];
+      return opts.some(o => o.glyph === glyph);
+    }
+    return false;
+  }
+  // Le glyphe est-il l'option 'undefined' de cette case ?
+  function caseAcceptsAsUndef(caseIdx, glyph){
+    const c = CASES[caseIdx];
+    if(!c || !c.dataOptions) return false;
+    const opts = GROUPS[c.dataOptions] || [];
+    const u = opts.find(o => o.label === 'undefined');
+    return !!u && u.glyph === glyph;
+  }
+  // Kind du glyphe, lu depuis la page (clavier fiable, sinon cases). Sert à l'aligneur pour
+  // savoir à quel TYPE de case ce glyphe pourrait correspondre (LA FORMULE : type attendu).
+  function glyphKindGlobal(g){
+    if(KEYBOARD_KIND[g]) return KEYBOARD_KIND[g];
+    for(const c of CASES){ if(c.fixedGlyph===g) return c.kind; }
+    for(const c of CASES){
+      if(isInteractive(c)){
+        const opts=GROUPS[c.dataOptions]||[];
+        if(opts.some(o=>o.glyph===g && o.label!=='undefined')) return c.kind;
+      }
+    }
+    return '?';
+  }
+  // Une case-ancre est-elle "posée" dans st ? (son glyphe fixe présent = typed/filled). Sert à
+  // vérifier que la colonne d'ancrage d'une case cible est satisfaite en amont.
+  function anchorSatisfiedInSt(anchorCaseIdx, st){
+    return !!(st[anchorCaseIdx] && (st[anchorCaseIdx].typed || st[anchorCaseIdx].filled));
+  }
+  // Toutes les ancres obligatoires (non skipables, hors AS) de la chaîne d'une case sont-elles
+  // satisfaites dans st ? Retourne la 1re ancre manquante {caseIdx, kind} ou null si tout est là.
+  // Les niveaux SKIPABLES ne sont pas obligatoires -> ignorés (R14).
+  function firstMissingAnchor(caseIdx, st){
+    const chain = (CASES[caseIdx] && CASES[caseIdx].anchorChain) || [];
+    for(const a of chain){
+      if(a.kind === 'as') continue;
+      if(a.caseIdx === caseIdx) continue;         // elle-même
+      if(!isAnchorKind(a.kind)) continue;
+      if(isSkippableKind(a.kind)) continue;       // skipable -> non obligatoire
+      if(!anchorSatisfiedInSt(a.caseIdx, st)) return {caseIdx:a.caseIdx, kind:a.kind};
+    }
+    return null;
+  }
+
+  // L'ALIGNEUR. glyphs = recs chronologiques ; caseIds = caseId de chaque rec (null = clavier).
+  // Produit st (agencement) + errors (divergences). Format identique à l'ancien validate.
+  function alignStToFormula(glyphs, caseIds){
+    caseIds = caseIds || [];
+    const st = CASES.map(c => ({filled:false, glyph:c.fixedGlyph, typed:false, srcChar:-1, isUndef:false}));
+    const errors = [];
+    let cursor = -1;   // dernière case consommée dans la formule
+
+    // Poser un glyphe dans une case (bloc interactif OU ancre fixe).
+    function place(caseIdx, glyph, gi, undef){
+      const c = CASES[caseIdx];
+      if(isInteractive(c)){
+        st[caseIdx].filled = true; st[caseIdx].glyph = glyph; st[caseIdx].srcChar = gi; st[caseIdx].isUndef = !!undef;
+      } else {
+        st[caseIdx].typed = true; st[caseIdx].srcChar = gi;
+      }
+    }
+    // Marquer les ancres obligatoires SAUTÉES entre (from, to) exclus comme trous need_ (celles
+    // qui devraient être posées mais ne le sont pas). Générique : lit la formule.
+    function flagSkippedAnchors(fromCursor, toCase, gi){
+      for(let k=fromCursor+1;k<toCase;k++){
+        const c = CASES[k];
+        if(!isAnchorKind(c.kind) || c.kind==='as') continue;
+        if(isSkippableKind(c.kind)) continue;
+        if(st[k].typed || st[k].filled) continue;
+        // cette ancre obligatoire est sautée ET fait partie de la chaîne de toCase ?
+        const chain = (CASES[toCase] && CASES[toCase].anchorChain) || [];
+        const inChain = chain.some(a => a.caseIdx === k);
+        if(inChain && !errors.some(e => e.target === k)){
+          errors.push({at: gi, kind: needKindOfAnchor(c.kind), target: k});
+        }
+      }
+    }
+    // Chercher la prochaine case (en avant depuis cursor) qui accepte ce glyphe (SHEET) et dont
+    // le kind correspond (FORMULE). Retourne {idx, undef} ou null. Le rec fait foi : on prend la
+    // 1re occurrence libre en avant (l'ordre chronologique des recs garantit la bonne occurrence).
+    function nextMatchingCase(glyph, gk){
+      for(let j=cursor+1;j<CASES.length;j++){
+        const c = CASES[j];
+        // ancre fixe : matche si son glyphe == glyph
+        // Case FIXE (non interactive, glyphe imposé) : matche par GLYPHE direct. Le fixedGlyph
+        // EST l'identité de la case (posture, as, part/subpart fixe, ...). Le kind n'intervient
+        // pas ici (une posture est classée 'descriptive dimension' au clavier mais sa case est
+        // 'posture' : c'est le glyphe qui fait foi).
+        if(!isInteractive(c)){
+          if(c.fixedGlyph != null && c.fixedGlyph === glyph && !st[j].typed) return {idx:j, undef:false};
+          continue;                            // ponctuation ou fixe non correspondante -> suivante
+        }
+        if(st[j].filled) continue;           // déjà remplie -> occurrence suivante
+        // undefined accepté partout où l'option existe
+        if(caseAcceptsAsUndef(j, glyph)) return {idx:j, undef:true};
+        // kind du glyphe doit correspondre au kind de la case (FORMULE)
+        if(gk !== c.kind) continue;
+        // glyphe doit être une option de la case (SHEET)
+        if(caseAccepts(j, glyph)) return {idx:j, undef:false};
+      }
+      return null;
+    }
+
+    for(let gi=0; gi<glyphs.length; gi++){
+      const glyph = glyphs[gi];
+      const gk = glyphKindGlobal(glyph);
+
+      // R00b — POSTURE = 1re position uniquement. Prioritaire.
+      if((gk==='posture' || gk==='descriptive dimension') && gi>0){
+        errors.push({at:gi, kind:'wrong_kind', target:-1, expected:'posture', postureOutOfHead:true});
+        continue;
+      }
+
+      // 1. REC AVEC caseId (glyphe de FORMULE) -> forcé sur SA case (R11, le rec fait foi).
+      const forced = caseIds[gi];
+      if(forced != null){
+        let placed = false;
+        for(let j=0;j<CASES.length;j++){
+          if(CASES[j].dataOptions === forced && !st[j].filled){
+            // vérifier l'ancrage amont : ancre manquante -> need_ (le glyphe reste posé, son rec le localise)
+            const miss = firstMissingAnchor(j, st);
+            if(miss){ errors.push({at:gi, kind:needKindOfAnchor(miss.kind), target:miss.caseIdx}); }
+            // subvar de la value doit être là (R03) : si on cible une value dont la subvar amont manque
+            const und = caseAcceptsAsUndef(j, glyph);
+            place(j, glyph, gi, und);
+            cursor = Math.max(cursor, j);
+            placed = true; break;
+          }
+        }
+        if(!placed){ errors.push({at:gi, kind:'no_match', target:-1}); }
+        continue;
+      }
+
+      // 2. REC SANS caseId (glyphe CLAVIER) -> chercher la prochaine case compatible EN AVANT.
+      const cell = nextMatchingCase(glyph, gk);
+      if(cell){
+        // ancres obligatoires sautées entre cursor et la cible -> trous need_
+        flagSkippedAnchors(cursor, cell.idx, gi);
+        // vérifier que la colonne d'ancrage de la cible est satisfaite (une ancre plus haute
+        // pourrait manquer même hors de l'intervalle) ; sinon need_ + NE PAS placer (glyphe sauvage).
+        const miss = firstMissingAnchor(cell.idx, st);
+        if(miss){
+          // glyphe sauvage : son ancre manque -> on émet le manque, on ne place pas.
+          if(!errors.some(e => e.target === miss.caseIdx)){
+            errors.push({at:gi, kind:needKindOfAnchor(miss.kind), target:miss.caseIdx});
+          }
+          continue;
+        }
+        // R03/R02b — une VALUE cible exige sa SUBVAR amont (case sub variable du même bloc, juste
+        // avant). Absente/undefined + vraie value -> manque var/subvar (kind selon skip). Sauvage :
+        // on NE place pas.
+        if(CASES[cell.idx].kind==='value' && !cell.undef){
+          const subIdx = cell.idx - 1;
+          const subOK = CASES[subIdx] && CASES[subIdx].kind==='sub variable' && st[subIdx].filled && !st[subIdx].isUndef;
+          if(CASES[subIdx] && CASES[subIdx].kind==='sub variable' && !subOK){
+            let varIdx=-1;
+            for(let q=subIdx-1;q>=0;q--){ const qk=CASES[q].kind; if(qk==='variable'){varIdx=q;break;} if(isAnchorKind(qk)||qk==='sub variable'){break;} }
+            const varPosed = varIdx>=0 && st[varIdx].typed;
+            const varSkippable = isSkippableKind('variable');
+            let e;
+            if(varPosed) e = {at:gi, kind:'need_subvar', target:subIdx};
+            else if(varSkippable) e = {at:gi, kind:'need_var_or_subvar', target:subIdx, altTarget:varIdx};
+            else e = {at:gi, kind:'need_var', target:(varIdx>=0?varIdx:subIdx)};
+            if(!errors.some(x => x.target === e.target && x.kind === e.kind)) errors.push(e);
+            continue;
+          }
+        }
+        place(cell.idx, glyph, gi, cell.undef);
+        cursor = cell.idx;
+        continue;
+      }
+
+      // 3. AUCUNE case compatible en avant -> le glyphe DIVERGE de la formule. Nature du refus :
+      //    - une case de son kind existe en avant mais son ANCRE manque -> need_<ancre> (sauvage)
+      //    - le glyphe est du mauvais kind ici -> wrong_kind
+      //    - bon kind mais aucune case (mauvais membre / ordre) -> wrong_<kind>
+      //    - rien d'identifiable -> no_match
+      const refusal = classifyDivergence(glyph, gk, st, cursor, errors, gi);
+      if(refusal) errors.push(refusal);
+    }
+
+    // POST-CONTRÔLES ÉMERGENTS (lus depuis la formule, pas des règles séparées) :
+    // (a) R07 — variable posée puis quittée sans subvar définie -> need_subvar.
+    postCheckVariableNeedsSubvar(glyphs, st, errors);
+    // (b) R08b — ancre posée sans contenu puis quittée pour une ancre de niveau <= -> abandoned.
+    postCheckAbandonedAnchor(st, errors);
+
+    errors.sort((a,b)=> a.at - b.at);
+    const first = errors.length ? errors[0] : null;
+    return {
+      st, errors,
+      errorAt: first ? first.at : -1,
+      errorKind: first ? first.kind : null,
+      errorTarget: first ? first.target : -1
+    };
+  }
+
+  // Classer une divergence (glyphe qui ne s'aligne sur aucune case en avant). Universel.
+  function classifyDivergence(glyph, gk, st, cursor, errors, gi){
+    if(gk === '?') return {at:gi, kind:'no_match', target:-1};
+    // existe-t-il en avant une case de CE kind (dont le glyphe est option) mais dont l'ancre manque ?
+    for(let j=cursor+1;j<CASES.length;j++){
+      const c = CASES[j];
+      if(c.kind !== gk) continue;
+      if(!isInteractive(c) && c.fixedGlyph !== glyph) continue;
+      if(isInteractive(c) && !caseAccepts(j, glyph)) continue;
+      const miss = firstMissingAnchor(j, st);
+      if(miss){
+        if(!errors.some(e => e.target === miss.caseIdx)){
+          return {at:gi, kind:needKindOfAnchor(miss.kind), target:miss.caseIdx};
+        }
+        return null; // déjà signalé
+      }
+    }
+    // le kind est-il attendu quelque part en avant ? (mauvais membre) sinon mauvais niveau.
+    const expectedKinds = new Set();
+    for(let k=cursor+1;k<CASES.length;k++){
+      const c=CASES[k];
+      if(isAnchorKind(c.kind)) expectedKinds.add(c.kind);
+      else if(isInteractive(c) && !st[k].filled) expectedKinds.add(c.kind);
+    }
+    if(expectedKinds.has(gk)){
+      return {at:gi, kind: wrongKindGlobal(gk), target:-1, expected:gk};
+    }
+    return {at:gi, kind:'wrong_kind', target:-1, expected:[...expectedKinds][0]||null, got:gk};
+  }
+  function wrongKindGlobal(kind){
+    switch(kind){
+      case 'selection':     return 'wrong_selection';
+      case 'part':          return 'wrong_part';
+      case 'sub part':      return 'wrong_subpart';
+      case 'subselection':  return 'wrong_subselection';
+      case 'variable':      return 'wrong_var';
+      case 'sub variable':  return 'wrong_subvar';
+      case 'value':         return 'wrong_value';
+      default:              return 'no_match';
+    }
+  }
+  // R07 — une variable posée (typed) exige une subvar définie SI un glyphe a été tapé après elle.
+  function postCheckVariableNeedsSubvar(glyphs, st, errors){
+    for(let vi=0; vi<CASES.length; vi++){
+      if(CASES[vi].kind !== 'variable') continue;
+      if(!st[vi].typed) continue;
+      let subIdx = -1;
+      for(let k=vi+1;k<CASES.length;k++){
+        const kk = CASES[k].kind;
+        if(kk === 'sub variable' && isInteractive(CASES[k])){ subIdx = k; break; }
+        if(kk === 'variable' || isAnchorKind(kk)) break;
+      }
+      if(subIdx < 0) continue;
+      if(st[subIdx].filled && !st[subIdx].isUndef) continue;
+      const varSrc = st[vi].srcChar;
+      if(varSrc < 0) continue;
+      let somethingAfter = false;
+      for(let k=0;k<CASES.length;k++){
+        if((st[k].filled || st[k].typed) && st[k].srcChar > varSrc){ somethingAfter = true; break; }
+      }
+      if(st[subIdx].isUndef && st[subIdx].srcChar >= 0) somethingAfter = true;
+      if(!somethingAfter) continue;
+      if(!errors.some(e => e.target === subIdx)){
+        errors.push({at: varSrc, kind: 'need_subvar', target: subIdx});
+      }
+    }
+  }
+  // R08b — ancre posée sans contenu, quittée pour une ancre de niveau <= -> abandoned.
+  function postCheckAbandonedAnchor(st, errors){
+    for(let ai=0; ai<CASES.length; ai++){
+      if(!isAnchorKind(CASES[ai].kind) || CASES[ai].kind==='as') continue;
+      if(!st[ai].typed) continue;
+      const La = anchorDepthOf(ai);
+      const srcA = st[ai].srcChar;
+      if(srcA < 0) continue;
+      if(subtreeHasFilledBlock(ai, st)) continue;
+      let deviated = false;
+      for(let k=0;k<CASES.length;k++){
+        if(k===ai) continue;
+        if(!isAnchorKind(CASES[k].kind) || CASES[k].kind==='as') continue;
+        if(!st[k].typed || st[k].srcChar < 0) continue;
+        if(st[k].srcChar > srcA && anchorDepthOf(k) <= La){ deviated = true; break; }
+      }
+      if(deviated && !errors.some(e => e.target === ai)){
+        errors.push({at: srcA, kind: needKindOfAnchor(CASES[ai].kind), target: ai, abandoned: true});
+      }
+    }
+  }
+
+  // validate DÉLÈGUE désormais à l'aligneur st↔formule (moteur de vérité universel). L'ancien
+  // corps procédural (findForward glouton + règles éparses) est conservé sous validateLegacy à
+  // des fins de comparaison/rollback, mais n'est plus appelé.
   function validate(glyphs, caseIds){
+    return alignStToFormula(glyphs, caseIds);
+  }
+  function validateLegacy(glyphs, caseIds){
     caseIds = caseIds || [];
     // état frais : pour chaque case, {filled, glyph, typed}
     const st = CASES.map(c => ({filled:false, glyph:c.fixedGlyph, typed:false, srcChar:-1, isUndef:false}));
