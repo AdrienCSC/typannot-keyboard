@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.15 (upper-limb: selection skipable comme finger)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.16 (empilement par RANG universel: parent effectif lu dans la formule, niveaux sautables ; anchorPosed regle du caractere pour ancres repetees ; missingAnchorFor remonte d un cran)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -154,6 +154,18 @@ function startTypannotEngine(){
     const set = ANCHOR_PARENTS[childKind];
     return !!(set && set.has(parentKind));
   }
+  // RANG d'un kind ancrant dans la hiérarchie de la page (Table 1). AS = 0 (le plus haut),
+  // puis 1, 2, 3... vers le bas. Sert à l'empilement UNIVERSEL : une ancre s'empile sous la
+  // première ancre de rang STRICTEMENT plus haut (rang plus petit), quel que soit son kind.
+  // Ainsi le parent effectif est LU dans la formule (l'ancre réelle au-dessus), pas imposé par
+  // un parent nommé unique — ce qui gère les pages où un niveau peut être sauté (upperface :
+  // nose -> subpart sans selection ; eyelids -> selection -> subpart).
+  const HIER = ANCHOR_HIERARCHY[PAGE] || [];
+  function anchorRank(kind){
+    if(kind === 'as') return 0;
+    const i = HIER.indexOf(kind);
+    return i < 0 ? 99 : (i + 1); // inconnu -> très bas
+  }
   function isAnchorKind(kind){
     return kind==='as' || (kind in ANCHOR_PARENTS);
   }
@@ -193,11 +205,15 @@ function startTypannotEngine(){
       if(kind === 'as'){
         anchorStack = [{ depth:0, kind:'as', name:nameFromTitle(title), glyph:fixedGlyph, caseIdx:idx }];
       } else if(isAnchorKind(kind)){
-        // dépiler jusqu'à trouver un parent autorisé de E (ou vider si aucun -> E devient racine
-        // sous AS implicite). Le sommet restant doit être parent de E.
+        // EMPILEMENT PAR RANG (universel) : le parent effectif est l'ancre réellement présente
+        // au-dessus dans la formule, du moment qu'elle est de rang strictement plus haut. On
+        // dépile tant que le sommet est de rang >= celui de E (même niveau ou plus bas = pas un
+        // parent). On s'arrête au 1er sommet de rang strictement plus haut, quel que soit son
+        // kind. Gère les niveaux sautés (nose->subpart sans selection) sans parent nommé unique.
+        const rE = anchorRank(kind);
         while(anchorStack.length){
           const top = anchorStack[anchorStack.length-1];
-          if(isChildOf(kind, top.kind)) break;      // top est parent légitime de E
+          if(anchorRank(top.kind) < rE) break;      // sommet strictement plus haut = parent effectif
           anchorStack.pop();
         }
         const depth = anchorStack.length;            // profondeur = sous le parent trouvé
@@ -472,7 +488,20 @@ function startTypannotEngine(){
         if(isInteractive(ac)) return st[anchorCaseIdx] && st[anchorCaseIdx].filled;
         // ancre fixe : posée si un glyphe l'a franchie (typed) OU si un contenu de sa portée
         // a été saisi avant le curseur courant (l'ancre fixe est implicitement validée).
-        return st[anchorCaseIdx] && (st[anchorCaseIdx].typed || anchorCaseIdx <= cursor);
+        if(st[anchorCaseIdx] && (st[anchorCaseIdx].typed || anchorCaseIdx <= cursor)) return true;
+        // RÈGLE DU CARACTÈRE : une ancre fixe peut être RÉPÉTÉE (même glyphe, occurrences
+        // multiples : ex nose apparaît avant nostrils ET avant dorsum). Ces occurrences sont la
+        // MÊME ancre fragmentée. Poser une occurrence satisfait l'ancrage de toutes. Donc l'ancre
+        // est posée si une autre case de MÊME glyphe (et même niveau) est typée.
+        const gA = ac.fixedGlyph, dA = anchorDepthOf(anchorCaseIdx);
+        if(gA){
+          for(let k=0;k<CASES.length;k++){
+            if(k===anchorCaseIdx) continue;
+            const ck=CASES[k];
+            if(ck.fixedGlyph===gA && anchorDepthOf(k)===dA && st[k] && st[k].typed) return true;
+          }
+        }
+        return false;
       }
       function needKindOf(anchorKind){
         switch(anchorKind){
@@ -483,13 +512,18 @@ function startTypannotEngine(){
           default:             return 'need_part';
         }
       }
-      // Premier maillon ancrant manquant de la chaîne de j (sommet -> bas), hors AS (racine
-      // implicite, jamais "manquant"). Retourne {kind, caseIdx} ou null si toute la chaîne est posée.
+      // Niveau manquant le PLUS PROCHE de la case (on remonte d'UN cran, pas jusqu'au sommet).
+      // On parcourt la chaîne du BAS (le plus profond, juste au-dessus de j) vers le HAUT et on
+      // retourne le premier maillon ancrant non posé et non skipable. Ex : subselection tapée
+      // seule -> on demande la subpart (cran juste au-dessus), pas la part (sommet).
       function missingAnchorFor(j){
         const chain = CASES[j] ? CASES[j].anchorChain : [];
-        for(const link of chain){
-          if(link.kind === 'as') continue;               // AS = racine, pas un manque
+        // du plus profond au plus haut
+        for(let idx = chain.length - 1; idx >= 0; idx--){
+          const link = chain[idx];
+          if(link.kind === 'as') continue;               // AS = racine, jamais un manque
           if(!isAnchorKind(link.kind)) continue;
+          if(link.caseIdx === j) continue;               // j lui-même n'est pas son propre parent
           if(isSkippableKind(link.kind)) continue;        // niveau SKIPABLE : jamais réclamé
           if(!anchorPosed(link.caseIdx)){
             return { kind: needKindOf(link.kind), caseIdx: link.caseIdx };
