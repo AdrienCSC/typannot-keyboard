@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.20 (fix rendu: TOUS les need_* generent un ◌ dans le champ - need_var_or_subvar/need_var/need_selection/need_subselection etaient oublies)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.21 (fix rendu champ: TOUS les wrong_* + abandoned colores rouge sur le glyphe dans le champ - seuls no_match/bad_value l etaient, donc R00b/R02/R08b invisibles)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -1377,13 +1377,14 @@ function startTypannotEngine(){
     // La miroir affiche la valeur RÉELLE de l'input (qui contient le ◌ si trou).
     const raw = Array.from(inputEl.value);
 
-    // Index du caractère fautif (faute : doublon, no_match, bad_value) à colorer rouge.
-    // result.errorAt est dans la séquence FILTRÉE (sans ◌). On le convertit en index raw.
-    // toutes les positions fautives (fautes = no_match, bad_value, doublon)
+    // Index du caractère fautif à colorer rouge dans le champ. Fautes = no_match, tous les
+    // wrong_* (wrong_kind, wrong_part, wrong_value...), abandoned (R08b), et doublon. Ces glyphes
+    // sont posés dans le champ mais invalides -> rouge sur le glyphe lui-même (pas une case).
     const wrongRawSet = new Set();
     const errList = result.errors || (result.errorAt >= 0 ? [{at:result.errorAt, kind:result.errorKind}] : []);
+    const isFaultKind = (k)=> k==='no_match' || k==='bad_value' || (typeof k==='string' && k.indexOf('wrong_')===0);
     errList.forEach(e => {
-      const isFault = (e.kind === 'no_match' || e.kind === 'bad_value');
+      const isFault = isFaultKind(e.kind) || e.abandoned;
       // doublon : vérifier via findDuplicateCell sur un subResult
       let isDup = false;
       if(!isFault){
