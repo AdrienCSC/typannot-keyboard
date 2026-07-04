@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.24 (PRIORITE VALUE->SUBVAR en bout de ligne: une value reclame d abord sa subvar cran par cran - remontee ascendante du stream pour desambiguiser au lieu d exiger toute la colonne d ancrage d un coup. value seule -> need_var_or_subvar SEUL, pas need_part+need_subpart)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.26 (CASCADE ref pos/zero reintegree dans l aligneur: poser ref pos sur une ancre remplit toute sa portee en couples refpos+zero linkes, avec REGLE DU CARACTERE - traverse les occurrences de meme glyphe (lips x4) sans deborder (jaw/tongue). Marche AS=toute la page, part, ancres repetees)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -322,6 +322,46 @@ function startTypannotEngine(){
     }
   }
   // ============================================================================
+  // CASCADE ref pos / zero (niveau module, accessible à l'aligneur). Poser ref pos sur une ancre
+  // remplit tous les blocs {subvar, value} de SA PORTÉE avec les couples ref pos + zero linkés.
+  // La portée intègre la RÈGLE DU CARACTÈRE : une ancre de même niveau ne borne QUE si son
+  // glyphe DIFFÈRE (même glyphe = même ancre fragmentée, ex lips ×4 -> traverse).
+  function isScopeBoundaryMod(anchorIdx, k){
+    if(!isAnchorKind(CASES[k].kind)) return false;
+    const L = anchorDepthOf(anchorIdx);
+    const dk = anchorDepthOf(k);
+    if(dk < L) return true;                        // remonté au-dessus -> frontière
+    if(dk === L){                                  // même niveau : dépend du caractère
+      return CASES[k].fixedGlyph !== CASES[anchorIdx].fixedGlyph; // glyphe diff -> frontière
+    }
+    return false;                                  // plus bas -> dans la sous-arborescence
+  }
+  // Les blocs {sub, val} de la portée d'une ancre (règle du caractère incluse).
+  function blocksUnderAnchorMod(anchorIdx){
+    const L = anchorDepthOf(anchorIdx);
+    if(L === 0 && CASES[anchorIdx].kind !== 'as' && !isAnchorKind(CASES[anchorIdx].kind)) return [];
+    const blocks = [];
+    for(let k=anchorIdx+1;k<CASES.length;k++){
+      if(isScopeBoundaryMod(anchorIdx, k)) break;
+      const ck = CASES[k].kind;
+      if(ck==='sub variable' && isInteractive(CASES[k])) blocks.push({sub:k, val:null});
+      if(ck==='value' && isInteractive(CASES[k]) && blocks.length){
+        const last = blocks[blocks.length-1];
+        if(last.val==null) last.val=k;
+      }
+    }
+    return blocks;
+  }
+  // Dernière case de la portée d'une ancre (même frontière).
+  function endOfAnchorScopeMod(anchorIdx){
+    let last = anchorIdx;
+    for(let k=anchorIdx+1;k<CASES.length;k++){
+      if(isScopeBoundaryMod(anchorIdx, k)) break;
+      last = k;
+    }
+    return last;
+  }
+  // ============================================================================
   // signature d'identité d'un bloc/case = sa chaîne d'ancres (glyphes) + variable au-dessus.
   // Deux cases interactives sont dans des blocs différents si leur signature diffère.
   function anchorSignature(caseIdx){
@@ -509,6 +549,26 @@ function startTypannotEngine(){
         }
         if(!placed){ errors.push({at:gi, kind:'no_match', target:-1}); }
         continue;
+      }
+
+      // CASCADE ref pos / zero : poser ref pos (ou zero) juste après une ANCRE (curseur sur une
+      // ancre, quel que soit son niveau) remplit TOUS les blocs {subvar, value} de sa portée avec
+      // les couples ref pos + zero linkés. Portée = règle du caractère (occurrences de même glyphe
+      // traversées). Universel : lit la formule. Ne concerne que le CLAVIER (ref pos lié à zero).
+      if((glyph===G_REFPOS || glyph===G_ZERO) && caseIds[gi]==null){
+        const lc = cursor>=0 ? CASES[cursor] : null;
+        if(lc && isAnchorKind(lc.kind)){
+          const blocks = blocksUnderAnchorMod(cursor);
+          if(blocks.length){
+            let maxK = cursor;
+            blocks.forEach(b => {
+              if(b.sub!=null && !st[b.sub].filled){ st[b.sub].filled=true; st[b.sub].glyph=G_REFPOS; st[b.sub].srcChar=gi; if(b.sub>maxK)maxK=b.sub; }
+              if(b.val!=null && !st[b.val].filled){ st[b.val].filled=true; st[b.val].glyph=G_ZERO;  st[b.val].srcChar=gi; if(b.val>maxK)maxK=b.val; }
+            });
+            cursor = Math.max(endOfAnchorScopeMod(cursor), maxK);
+            continue;
+          }
+        }
       }
 
       // 2. REC SANS caseId (glyphe CLAVIER) -> chercher la prochaine case compatible EN AVANT.
@@ -1507,7 +1567,27 @@ function startTypannotEngine(){
   }
 
   // ---------- ÉVÉNEMENT PRINCIPAL : tout changement de l'input ----------
-  const mirrorEl = document.getElementById('input-mirror');
+  let mirrorEl = document.getElementById('input-mirror');
+  // Le conteneur #input-mirror n'est pas garanti présent dans le DOM Webflow (il n'est déclaré
+  // qu'en CSS). getMirror() le récupère, et le CRÉE s'il manque (inséré à côté du champ input),
+  // pour que l'affichage coloré du champ fonctionne sur toutes les pages. Si même le champ input
+  // est absent, retourne un objet INERTE (no-op) : le moteur reste fonctionnel sans planter.
+  const INERT_MIRROR = { innerHTML:'', scrollLeft:0, appendChild(){}, querySelector(){return null;}, querySelectorAll(){return [];} };
+  function getMirror(){
+    if(mirrorEl) return mirrorEl;
+    mirrorEl = document.getElementById('input-mirror');
+    if(mirrorEl) return mirrorEl;
+    // créer le conteneur mirror s'il n'existe pas
+    if(inputEl && inputEl.parentNode){
+      const mm = document.createElement('div');
+      mm.id = 'input-mirror';
+      mm.setAttribute('aria-hidden','true');
+      inputEl.parentNode.insertBefore(mm, inputEl.nextSibling);
+      mirrorEl = mm;
+      return mirrorEl;
+    }
+    return INERT_MIRROR;
+  }
 /* =====================================================================
    MODÈLE (base de données cachée) — ÉTAPE 1
    ---------------------------------------------------------------------
@@ -1751,9 +1831,9 @@ function startTypannotEngine(){
       inner.appendChild(sp);
     });
 
-    mirrorEl.innerHTML = '';
-    mirrorEl.appendChild(inner);
-    mirrorEl.scrollLeft = inputEl.scrollLeft;
+    getMirror().innerHTML = '';
+    getMirror().appendChild(inner);
+    getMirror().scrollLeft = inputEl.scrollLeft;
   }
 
   let isSyncing = false; // anti-récursion lors de la manipulation de l'input
@@ -2391,7 +2471,7 @@ function startTypannotEngine(){
     onInputChanged('cut');
   });
   // garder la miroir alignée lors du scroll horizontal (texte qui dépasse)
-  inputEl.addEventListener('scroll', () => { mirrorEl.scrollLeft = inputEl.scrollLeft; });
+  inputEl.addEventListener('scroll', () => { getMirror().scrollLeft = inputEl.scrollLeft; });
 
   var _clearKey = document.querySelector('.clear-key');
   if(_clearKey) _clearKey.addEventListener('click', () => {
@@ -2451,7 +2531,7 @@ function startTypannotEngine(){
   }
   function snapshotField(){
     // champ texte avec ◌ et indication des couleurs depuis la miroir
-    const spans = Array.from(mirrorEl.querySelectorAll('.mirror-inner > span:not(.blink-caret)'));
+    const spans = Array.from(getMirror().querySelectorAll('.mirror-inner > span:not(.blink-caret)'));
     if(!spans.length) return inputEl.value ? Array.from(inputEl.value).map(c=>c==='◌'?'◌':glyphName(c)).join(' ') : '(vide)';
     return spans.map(s=>{
       const c = s.textContent;
@@ -2608,7 +2688,7 @@ function startTypannotEngine(){
   }
   function refreshResolutionHighlight(){
     const ctx = resolutionContext();
-    const spans = Array.from(mirrorEl.querySelectorAll('.mirror-inner > span:not(.blink-caret)'));
+    const spans = Array.from(getMirror().querySelectorAll('.mirror-inner > span:not(.blink-caret)'));
     spans.forEach(s => s.classList.remove('ins-caret-blue'));
     // Déterminer le ◌ ACTIF : celui sous le curseur, sinon le DERNIER créé TEMPORELLEMENT.
     let activeHole = ctx.hole;
@@ -2670,7 +2750,7 @@ function startTypannotEngine(){
 
   // ===== CURSEUR CLIGNOTANT custom (toujours visible dans la miroir) =====
   function placeBlinkCaret(){
-    const inner = mirrorEl.querySelector('.mirror-inner');
+    const inner = getMirror().querySelector('.mirror-inner');
     if(!inner) return;
     // retirer l'ancien curseur
     const old = inner.querySelector('.blink-caret');
@@ -2781,12 +2861,12 @@ function startTypannotEngine(){
     c.span.addEventListener('mouseenter', () => {
       if(!c.span.classList.contains('solcell')) return; // seulement les undefined bleus
       const h = holeForFormulaCase(c.idx);
-      const spans = Array.from(mirrorEl.querySelectorAll('.mirror-inner > span:not(.blink-caret)'));
+      const spans = Array.from(getMirror().querySelectorAll('.mirror-inner > span:not(.blink-caret)'));
       spans.forEach(s => s.classList.remove('ins-caret-hover-blue'));
       if(h && spans[h.rawPos]) spans[h.rawPos].classList.add('ins-caret-hover-blue');
     });
     c.span.addEventListener('mouseleave', () => {
-      const spans = Array.from(mirrorEl.querySelectorAll('.mirror-inner > span:not(.blink-caret)'));
+      const spans = Array.from(getMirror().querySelectorAll('.mirror-inner > span:not(.blink-caret)'));
       spans.forEach(s => s.classList.remove('ins-caret-hover-blue'));
     });
   });
@@ -2805,7 +2885,7 @@ function startTypannotEngine(){
   }
   function clearViolet(){
     document.querySelectorAll('.framework .syntax_text.link-violet').forEach(e => e.classList.remove('link-violet'));
-    mirrorEl.querySelectorAll('span.link-violet').forEach(e => e.classList.remove('link-violet'));
+    getMirror().querySelectorAll('span.link-violet').forEach(e => e.classList.remove('link-violet'));
   }
   // Hover sur une CASE FORMULE remplie -> violet sur le(s) caractère(s) source du champ
   // + toutes les cases formule partageant le même srcChar (cascade/linkage).
@@ -2818,7 +2898,7 @@ function startTypannotEngine(){
     // hover FORMULE -> violet UNIQUEMENT dans le CHAMP (le caractère source).
     const rawPos = filteredToRaw(src);
     if(rawPos >= 0){
-      const sp = mirrorEl.querySelector('.mirror-inner > span[data-rawidx="'+rawPos+'"]');
+      const sp = getMirror().querySelector('.mirror-inner > span[data-rawidx="'+rawPos+'"]');
       if(sp) sp.classList.add('link-violet');
     }
   }
@@ -2853,7 +2933,7 @@ function startTypannotEngine(){
   // L'input est transparent AU-DESSUS de la miroir : les events souris vont à l'input.
   // On détecte le caractère survolé via la position X de la souris.
   inputEl.addEventListener('mousemove', (e) => {
-    const spans = Array.from(mirrorEl.querySelectorAll('.mirror-inner > span[data-rawidx]:not(.blink-caret)'));
+    const spans = Array.from(getMirror().querySelectorAll('.mirror-inner > span[data-rawidx]:not(.blink-caret)'));
     if(!spans.length){ clearViolet(); return; }
     const x = e.clientX;
     let found = null;
