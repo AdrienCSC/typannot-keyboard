@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.16 (empilement par RANG universel: parent effectif lu dans la formule, niveaux sautables ; anchorPosed regle du caractere pour ancres repetees ; missingAnchorFor remonte d un cran)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.19 (SYNTAXE complete: R02 wrong_kind/wrong_membre/no_match, R02b need_var_or_subvar, R00b posture tete, R12 ordre, R14 var skipable)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -100,13 +100,16 @@ function startTypannotEngine(){
     lowerface:   ['part','sub part','subselection'],
     upperface:   ['part','selection','sub part','subselection'],
   };
-  // ===== TABLE 3 — SKIP : niveaux ancrants SKIPABLES par page ===== (voir après detectPage)
+  // ===== TABLE 3 — SKIP : niveaux SKIPABLES par page ===== (voir après detectPage)
+  // Deux familles de skip : (a) niveaux ANCRANTS omissibles (selection sur finger/upper-limb) ;
+  // (b) la VARIABLE, skipable partout (pattern universel var>subvar>value : on peut poser la
+  // subvar sans passer par la variable). R14 : tolérance de ce qu'on a le droit de NE PAS écrire.
   const ANCHOR_SKIPPABLE = {
-    finger:      ['selection'],
-    'upper-limb':['selection'],
-    body:        [],
-    lowerface:   [],
-    upperface:   [],
+    finger:      ['selection','variable'],
+    'upper-limb':['selection','variable'],
+    body:        ['variable'],
+    lowerface:   ['variable'],
+    upperface:   ['variable'],
   };
 
   // La hiérarchie (chaîne unique) exposée comme branche unique pour construire les relations
@@ -308,6 +311,16 @@ function startTypannotEngine(){
     }
     return false;
   }
+  // Kind de manque associé à un kind ancrant (universel, partagé). need_<niveau>.
+  function needKindOfAnchor(anchorKind){
+    switch(anchorKind){
+      case 'selection':    return 'need_selection';
+      case 'part':         return 'need_part';
+      case 'sub part':     return 'need_subpart';
+      case 'subselection': return 'need_subselection';
+      default:             return 'need_part';
+    }
+  }
   // ============================================================================
   // signature d'identité d'un bloc/case = sa chaîne d'ancres (glyphes) + variable au-dessus.
   // Deux cases interactives sont dans des blocs différents si leur signature diffère.
@@ -454,6 +467,42 @@ function startTypannotEngine(){
       });
       return f;
     }
+    // R02 — Classification d'un REFUS. Quand un glyphe ne matche aucune case en avant, on
+    // précise POURQUOI, par priorité (wrong_kind > wrong_<niveau> > no_match) :
+    //  - le glyphe est d'un KIND identifiable (via glyphKindLocal) présent dans la formule à un
+    //    autre endroit, mais pas au niveau attendu ici -> `wrong_kind` (mauvais niveau).
+    //  - le glyphe est du BON kind attendu, mais aucune case de ce kind ne l'accepte en avant
+    //    (mauvais membre) -> `wrong_<niveau>` (wrong_part, wrong_subvar, ...).
+    //  - le glyphe n'est d'aucun kind identifiable de la page -> `no_match`.
+    // « niveau attendu » = les kinds des cases accessibles en avant depuis le curseur (les cases
+    // interactives non remplies + ancres, jusqu'à la fin). Universel : lu depuis CASES/st.
+    function wrongKindOf(kind){
+      switch(kind){
+        case 'selection':     return 'wrong_selection';
+        case 'part':          return 'wrong_part';
+        case 'sub part':      return 'wrong_subpart';
+        case 'subselection':  return 'wrong_subselection';
+        case 'variable':      return 'wrong_var';
+        case 'sub variable':  return 'wrong_subvar';
+        case 'value':         return 'wrong_value';
+        default:              return 'no_match';
+      }
+    }
+    function classifyRefusal(glyph){
+      const gk = glyphKindLocal(glyph);
+      if(gk === '?' ) return {err:'no_match'};              // aucun kind identifiable
+      // kinds attendus en avant (cases non remplies accessibles depuis le curseur)
+      const expectedKinds = new Set();
+      for(let k=cursor+1;k<CASES.length;k++){
+        const c=CASES[k];
+        if(isAnchorKind(c.kind)) expectedKinds.add(c.kind);
+        else if(isInteractive(c) && !st[k].filled) expectedKinds.add(c.kind);
+      }
+      // le glyphe est-il du bon kind attendu mais aucune case précise ne l'accepte ? (mauvais membre)
+      if(expectedKinds.has(gk)) return {err: wrongKindOf(gk), expected: gk};
+      // le glyphe est d'un kind connu de la page mais PAS attendu ici -> mauvais niveau
+      return {err:'wrong_kind', expected:[...expectedKinds][0] || null, got: gk};
+    }
     function findForward(glyph, forcedCaseId){
       // Si le rec porte un caseId (glyphe posé via la formule sur un bloc précis), on FORCE
       // le placement dans la case exacte dont dataOptions === caseId. Le rec est la frontiere :
@@ -503,15 +552,7 @@ function startTypannotEngine(){
         }
         return false;
       }
-      function needKindOf(anchorKind){
-        switch(anchorKind){
-          case 'selection':    return 'need_selection';
-          case 'part':         return 'need_part';
-          case 'sub part':     return 'need_subpart';
-          case 'subselection': return 'need_subselection';
-          default:             return 'need_part';
-        }
-      }
+      function needKindOf(anchorKind){ return needKindOfAnchor(anchorKind); }
       // Niveau manquant le PLUS PROCHE de la case (on remonte d'UN cran, pas jusqu'au sommet).
       // On parcourt la chaîne du BAS (le plus profond, juste au-dessus de j) vers le HAUT et on
       // retourne le premier maillon ancrant non posé et non skipable. Ex : subselection tapée
@@ -542,12 +583,30 @@ function startTypannotEngine(){
           const subFilledUndef = ps && ps.kind==='sub variable' && st[j-1].filled && st[j-1].isUndef;
           if(subFilledReal){
             if(gMatch(glyph,j))return{idx:j};
-            if(glyphKindLocal(glyph)==='value'){ return{err:"bad_value", target:j}; }
+            // le glyphe est une value mais pas celle de cette case -> wrong_value (bon niveau,
+            // mauvais membre). R02 : bad_value scindé.
+            if(glyphKindLocal(glyph)==='value'){ return{err:"wrong_value", target:j, expected:'value'}; }
             return{err:'value_due', target:j};
           }
-          // subvar UNDEFINED (ou vide) + vraie value -> faute : vraie value exige vraie subvar
+          // subvar UNDEFINED (ou vide) + vraie value -> il manque le niveau var/subvar.
+          // R02b : le KIND du manque dépend de la variable au-dessus (skipable ? posée ?).
           if((subFilledUndef || (ps&&ps.kind==='sub variable'&&!st[j-1].filled))){
-            if(gMatch(glyph,j))return{err:'need_subvar', target:j-1};
+            if(gMatch(glyph,j)){
+              // trouver la variable de ce bloc (juste avant la subvar j-1)
+              let varIdx=-1;
+              for(let q=j-2;q>=0;q--){ const qk=CASES[q].kind; if(qk==='variable'){varIdx=q;break;} if(isAnchorKind(qk)||qk==='sub variable'){break;} }
+              const varPosed = varIdx>=0 && st[varIdx].typed;
+              const varSkippable = isSkippableKind('variable');
+              if(varPosed){
+                return{err:'need_subvar', target:j-1};             // var déjà là : manque que la subvar
+              } else if(varSkippable){
+                // var skipable non posée : deux chemins (var puis subvar, OU subvar directe).
+                // Cibles multiples : la subvar (j-1) ET la variable (varIdx).
+                return{err:'need_var_or_subvar', target:j-1, altTarget:varIdx};
+              } else {
+                return{err:'need_var', target:(varIdx>=0?varIdx:j-1)}; // var obligatoire
+              }
+            }
           }
         }
         // UNDEFINED en subvar libre : accepté (contenu neutre)
@@ -574,7 +633,7 @@ function startTypannotEngine(){
           return{idx:j};
         }
       }
-      return{err:'no_match'};
+      return classifyRefusal(glyph);   // R02 : préciser wrong_kind / wrong_<niveau> / no_match
     }
 
     // R13 — une ré-invocation d'ancre (case j, ancre matchée) est-elle un doublon fautif ?
@@ -619,6 +678,16 @@ function startTypannotEngine(){
     for(let gi=0; gi<glyphs.length; gi++){
       const glyph=glyphs[gi];
 
+      // R00b — POSTURE = premier glyphe uniquement (cadre prioritaire). Une posture ailleurs
+      // qu'en tête de saisie est une erreur ; prime sur les autres règles. En gi=0 elle est
+      // légitime (elle s'ancre sur la case posture @0 via le flux normal). La posture peut être
+      // classée 'posture' ou 'descriptive dimension' selon la source (titre vs clavier).
+      const gk0 = glyphKindLocal(glyph);
+      if((gk0==='posture' || gk0==='descriptive dimension') && gi>0){
+        errors.push({at:gi, kind:'wrong_kind', target:-1, expected:'posture', postureOutOfHead:true});
+        continue;
+      }
+
       // complément paire sur place
       if(cursor>=0){
         const cc=CASES[cursor];
@@ -655,18 +724,26 @@ function startTypannotEngine(){
       const res=findForward(glyph, caseIds[gi]);
       if(res.err){
         // MULTI-ERREUR : enregistrer l'erreur et CONTINUER (skip du glyph fautif).
-        errors.push({at:gi, kind:res.err, target:(res.target!=null?res.target:-1)});
+        errors.push({at:gi, kind:res.err, target:(res.target!=null?res.target:-1),
+                     altTarget:(res.altTarget!=null?res.altTarget:undefined),
+                     expected:res.expected});
         // Avancer le curseur pour que le prochain glyph soit correctement ciblé :
         // pour une value orpheline (need_subvar), on marque la value visée comme
         // "occupée" par ce glyph et on avance au-delà, afin que la value suivante
         // cherche dans un bloc ultérieur.
-        if(res.err === 'need_subvar' && res.target != null){
-          // res.target = case subvar ; la value du bloc est juste après (target+1).
-          const valCase = res.target + 1;
-          if(CASES[valCase] && CASES[valCase].kind === 'value'){
-            // marquer provisoirement pour placement (srcChar = ce glyph)
-            st[valCase].filled = true; st[valCase].glyph = glyph; st[valCase].srcChar = gi;
-            cursor = valCase;
+        if((res.err === 'need_subvar' || res.err === 'need_var_or_subvar' || res.err === 'need_var') && res.target != null){
+          // RÈGLE DU GLYPHE SAUVAGE : un glyphe tapé au CLAVIER (sans caseId) qui n'a pas de
+          // contexte valide ne se place NULLE PART. On émet juste le manque (le cran au-dessus :
+          // subvar, var-ou-subvar, ou var selon R02b) ; l'UI proposera en bleu les cases
+          // possibles. On NE marque PAS la value. Un glyphe de FORMULE porte un caseId : son rec
+          // sait où il habite, il n'arrive jamais ici sans contexte -> placement provisoire.
+          const fromKeyboard = (caseIds[gi] == null);
+          if(!fromKeyboard){
+            const valCase = res.target + 1;
+            if(CASES[valCase] && CASES[valCase].kind === 'value'){
+              st[valCase].filled = true; st[valCase].glyph = glyph; st[valCase].srcChar = gi;
+              cursor = valCase;
+            }
           }
           continue;
         } else if(res.err === 'value_due' && res.target != null && res.target > cursor && retryCount < 3){
@@ -737,6 +814,32 @@ function startTypannotEngine(){
         errors.push({at: varSrc, kind: 'need_subvar', target: subIdx});
       }
     }
+    // R08b — COMPLÉTUDE DE BRANCHE (ancre abandonnée). Une branche entamée doit être menée au
+    // bout sans déviation : dès qu'une ancre A est posée puis QUITTÉE pour une ancre B de niveau
+    // <= celui de A (même niveau ou plus haut) SANS que A ait reçu de contenu (aucune subvar
+    // posée dans sa portée), A est abandonnée -> erreur LOCALE sur A. « Annoté » = une subvar
+    // posée (R13 : la subvar est le plancher ; var au-dessus et value en-dessous skippables).
+    // Générique : vaut pour tout niveau ancrant. Universel via anchorDepthOf + subtreeHasFilledBlock.
+    for(let ai=0; ai<CASES.length; ai++){
+      if(!isAnchorKind(CASES[ai].kind) || CASES[ai].kind==='as') continue;
+      if(!st[ai].typed) continue;                          // ancre non posée -> rien à juger
+      const La = anchorDepthOf(ai);
+      const srcA = st[ai].srcChar;
+      if(srcA < 0) continue;
+      // A a-t-elle du contenu (une subvar posée) dans sa portée ? (règle du caractère incluse)
+      if(subtreeHasFilledBlock(ai, st)) continue;          // A alimentée -> pas abandonnée
+      // A est vide : a-t-on posé APRÈS A une ancre de niveau <= La (déviation hors de A) ?
+      let deviated = false;
+      for(let k=0;k<CASES.length;k++){
+        if(k===ai) continue;
+        if(!isAnchorKind(CASES[k].kind) || CASES[k].kind==='as') continue;
+        if(!st[k].typed || st[k].srcChar < 0) continue;
+        if(st[k].srcChar > srcA && anchorDepthOf(k) <= La){ deviated = true; break; }
+      }
+      if(deviated && !errors.some(e => e.target === ai)){
+        errors.push({at: srcA, kind: needKindOfAnchor(CASES[ai].kind), target: ai, abandoned: true});
+      }
+    }
     // re-trier les erreurs par ordre de saisie (at croissant) pour cohérence
     errors.sort((a,b)=> a.at - b.at);
     // rétrocompat : errorAt/Kind/Target = la PREMIÈRE erreur (ou -1 si aucune)
@@ -798,7 +901,7 @@ function startTypannotEngine(){
 
     // 3. Marquer les erreurs (rouge/bleu) pour CHAQUE erreur
     errs.forEach(e => {
-      const subResult = {st:st, errorAt:e.at, errorKind:e.kind, errorTarget:e.target, _glyphs:glyphs};
+      const subResult = {st:st, errorAt:e.at, errorKind:e.kind, errorTarget:e.target, altTarget:e.altTarget, abandoned:e.abandoned, _glyphs:glyphs};
       markErrorCell(subResult, glyphs);
     });
 
@@ -952,18 +1055,24 @@ function startTypannotEngine(){
 
     // 2. Erreurs non ambiguës : une seule case
     if(errorTarget == null || errorTarget < 0) return;
-    // bad_value : la value est présente mais invalide -> ROUGE sur la case value
-    if(errorKind === 'bad_value'){
-      if(CASES[errorTarget].span) CASES[errorTarget].span.classList.add('errcell');
-      return;
-    }
     let cellToMark = -1;
     let isHole = false;  // trou (manque) -> bleu ; sinon rouge
     // Manques d'ancrage et de bloc : la case à marquer EST errorTarget (missingAnchorFor et la
     // détection posent déjà la caseIdx de l'ancre/bloc manquant). Générique, aucun niveau nommé.
     const HOLE_KINDS = ['need_subvar','value_due','need_selection','need_part','need_subpart',
                         'need_subselection','need_var','need_var_or_subvar'];
-    if(HOLE_KINDS.includes(errorKind)){
+    // R08b : une ancre ABANDONNÉE (posée sans contenu, quittée) est une FAUTE -> rouge, pas un
+    // trou. Bien que le kind soit un need_*, le flag abandoned la classe en faute.
+    if(result.abandoned){
+      cellToMark = errorTarget; isHole = false;
+    }
+    else if(errorKind === 'need_var_or_subvar'){
+      // R02b : deux cibles proposées (subvar ET variable) -> les deux en bleu.
+      if(errorTarget>=0 && CASES[errorTarget].span) CASES[errorTarget].span.classList.add('solcell');
+      if(result.altTarget!=null && result.altTarget>=0 && CASES[result.altTarget].span) CASES[result.altTarget].span.classList.add('solcell');
+      return;
+    }
+    else if(HOLE_KINDS.includes(errorKind)){
       cellToMark = errorTarget; isHole = true;
     }
     else { cellToMark = errorTarget; }  // no_match / wrong_* -> rouge (faute)
