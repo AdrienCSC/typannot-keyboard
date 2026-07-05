@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.28 (◌ en SVG via IMG injecte: le ◌ est rendu comme un <img> SVG dans le mirror (rond=structurel need_part/subpart/selection/subselection, carre=valeur need_var/subvar/var_or_subvar/value_due). Couleur par le src: rouge=manque, bleu=◌ actif de resolution (bascule dans refreshResolutionHighlight). Le caractere ◌ reste dans inputEl.value, seul le rendu change. Plus de background moche)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.29 (prepare le double glyphe ◌: DOUBLE INJECTION - DOT_STRUCT (parts/ancrage) vs DOT_VALUE (var/subvar/value), MEME caractere ◌ pour l instant (rendu identique v4.26). isDot() reconnait les deux partout, dotForKind() choisit lequel inserer, classe ins-caret-struct/-value posee selon la nature. Quand la police aura 2 glyphes: remplacer juste les 2 constantes)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -1560,18 +1560,25 @@ function startTypannotEngine(){
   }
 
   // ---------- DÉCOUPER la valeur de l'input en glyphs ----------
-  const DOT = '◌'; // caractère "il manque un élément" (vrai char dans l'input)
-  // URLs des SVG du ◌ : forme (round=structurel / square=valeur) × couleur (red=manque /
-  // blue=résolution active). Le rendu injecte un <img> et choisit rouge/bleu selon l'état.
-  const DOT_SVG_URLS = {
-    round: { red:  'https://cdn.prod.website-files.com/6a4872338398df20e02f9834/6a4a77ac70325ae14aca4600_round-dots_red.svg',
-             blue: 'https://cdn.prod.website-files.com/6a4872338398df20e02f9834/6a4a77acf238973d23467c90_round-dots_blue.svg' },
-    square:{ red:  'https://cdn.prod.website-files.com/6a4872338398df20e02f9834/6a4a77ac65c0cac5cff9a5ca_square-dots_red.svg',
-             blue: 'https://cdn.prod.website-files.com/6a4872338398df20e02f9834/6a4a77ac2a6dee9e17e6f0f8_square-dots_blue.svg' }
-  };
+  // DEUX types de trou selon la nature du manque : STRUCTUREL (parts/ancrage) vs VALEUR
+  // (var/subvar/value). Pour l'instant les deux sont le MÊME caractère ◌ (rendu identique à
+  // avant). Quand la police aura 2 glyphes distincts (rond/carré), on remplacera juste ces deux
+  // constantes par les nouveaux codepoints — le reste du code ne bouge pas.
+  const DOT_STRUCT = '◌'; // trou structurel (need_part/subpart/selection/subselection)
+  const DOT_VALUE  = '◌'; // trou de valeur    (need_var/subvar/var_or_subvar/value/value_due)
+  const DOT = DOT_STRUCT; // caractère "il manque un élément" par défaut (compat)
+  // Reconnaît un trou quel que soit son type (les deux caractères). Utilisé partout où on
+  // testait `isDot(ch)`. Tant que STRUCT===VALUE, équivaut à l'ancien test ; quand ils
+  // différeront, reconnaît bien les deux.
+  function isDot(ch){ return ch === DOT_STRUCT || ch === DOT_VALUE; }
+  // Kinds STRUCTURELS -> DOT_STRUCT ; kinds de VALEUR -> DOT_VALUE. Sert à choisir quel trou insérer.
+  const HOLE_KIND_STRUCT_SET = ['need_part','need_subpart','need_selection','need_subselection'];
+  function dotForKind(kind){
+    return HOLE_KIND_STRUCT_SET.includes(kind) ? DOT_STRUCT : DOT_VALUE;
+  }
   function toGlyphs(str){
     // la validation IGNORE les ◌ (ce ne sont pas de vrais glyphes)
-    return Array.from(str).filter(ch => ch !== DOT);
+    return Array.from(str).filter(ch => !isDot(ch));
   }
 
   // ---------- ÉVÉNEMENT PRINCIPAL : tout changement de l'input ----------
@@ -1675,7 +1682,7 @@ function startTypannotEngine(){
   // Compare la séquence de glyphes du modèle au texte du champ (hors ◌).
   // Retourne { ok, modelStr, fieldStr }. Sert de sonde de fidélité (étape 1).
   function modelCheckAgainstField(){
-    const fieldGlyphs = Array.from(inputEl.value).filter(ch => ch !== DOT);
+    const fieldGlyphs = Array.from(inputEl.value).filter(ch => !isDot(ch));
     const modelStr = modelGlyphs().join('');
     const fieldStr = fieldGlyphs.join('');
     return { ok: (modelStr === fieldStr), modelStr: modelStr, fieldStr: fieldStr };
@@ -1726,7 +1733,7 @@ function startTypannotEngine(){
   }
 
   function modelReconcileWithField(){
-    const field = Array.from(inputEl.value).filter(ch => ch !== DOT);
+    const field = Array.from(inputEl.value).filter(ch => !isDot(ch));
     const before = fieldSnapshotBefore;
 
     // Aligné avec l'état capté avant le geste ET modèle cohérent : rien à faire.
@@ -1807,7 +1814,7 @@ function startTypannotEngine(){
         // convertir e.at (filtré) en index raw
         let count = 0;
         for(let i=0;i<raw.length;i++){
-          if(raw[i] === DOT) continue;
+          if(isDot(raw[i])) continue;
           if(count === e.at){ wrongRawSet.add(i); break; }
           count++;
         }
@@ -1820,42 +1827,28 @@ function startTypannotEngine(){
     if(orangeSrcList.length){
       let cnt = 0;
       for(let i=0;i<raw.length;i++){
-        if(raw[i] === DOT) continue;
+        if(isDot(raw[i])) continue;
         if(orangeSrcList.includes(cnt)) orangeRaw.add(i);
         cnt++;
       }
     }
-    const HOLE_KIND_STRUCT = ['need_part','need_subpart','need_selection','need_subselection'];
-    const HOLE_KIND_VALUE  = ['need_variable','need_var','need_subvar','need_var_or_subvar','need_value','value_due'];
     raw.forEach((ch, i) => {
       const sp = document.createElement('span');
+      sp.textContent = ch;
       sp.setAttribute('data-rawidx', i);
-      if(ch === DOT){
-        // forme selon le kind de CE ◌ (retrouvé par sa position brute dans lastHoleInfos).
+      if(isDot(ch)){
+        // classe de base + classe de NATURE (structurel/valeur). La nature est lue via le kind
+        // du ◌ dans lastHoleInfos (fiable même si les deux caractères sont identiques pour l'instant).
         const info = lastHoleInfos.find(h => h.rawPos === i);
-        let form = null;
+        let nat = '';
         if(info && info.kind){
-          if(HOLE_KIND_STRUCT.includes(info.kind)) form = 'round';
-          else if(HOLE_KIND_VALUE.includes(info.kind)) form = 'square';
+          nat = HOLE_KIND_STRUCT_SET.includes(info.kind) ? ' ins-caret-struct' : ' ins-caret-value';
         }
-        sp.className = 'ins-caret';
-        if(form){
-          const img = document.createElement('img');
-          img.className = 'ins-caret-svg';
-          img.setAttribute('data-form', form);
-          img.src = DOT_SVG_URLS[form].red;   // rouge par défaut ; passe en bleu si ◌ actif (résolution)
-          img.alt = '';
-          sp.appendChild(img);
-        } else {
-          sp.textContent = ch;   // fallback : ◌ texte si kind inconnu
-        }
-      } else {
-        sp.textContent = ch;
-        if(wrongRawSet.has(i)){
-          sp.className = 'ch-wrong';          // faute en rouge
-        } else if(orangeRaw.has(i)){
-          sp.className = 'ch-impact';         // impacté en orange
-        }
+        sp.className = 'ins-caret' + nat;   // ◌ rouge + nature (struct/value)
+      } else if(wrongRawSet.has(i)){
+        sp.className = 'ch-wrong';          // faute en rouge
+      } else if(orangeRaw.has(i)){
+        sp.className = 'ch-impact';         // impacté en orange
       }
       inner.appendChild(sp);
     });
@@ -1892,7 +1885,7 @@ function startTypannotEngine(){
     } else if(MAINTAINED || reason === 'init' || reason === 'clear'){
       // le MODEL vient d'être muté (ou vidé) hors réconciliation : réancrer le snapshot AVANT
       // sur l'état courant du champ, pour que le PROCHAIN geste natif diffe contre le bon état.
-      fieldSnapshotBefore = Array.from(inputEl.value).filter(ch => ch !== DOT);
+      fieldSnapshotBefore = Array.from(inputEl.value).filter(ch => !isDot(ch));
     }
 
     // 1. Retirer tous les ◌ existants pour repartir d'une base propre,
@@ -1902,8 +1895,8 @@ function startTypannotEngine(){
     if(caret == null) caret = rawBefore.length;
     // compter les ◌ avant le curseur pour réajuster
     let dotsBeforeCaret = 0;
-    for(let i=0;i<caret && i<rawBefore.length;i++){ if(rawBefore[i]===DOT) dotsBeforeCaret++; }
-    const cleanValue = rawBefore.filter(ch => ch !== DOT).join('');
+    for(let i=0;i<caret && i<rawBefore.length;i++){ if(isDot(rawBefore[i])) dotsBeforeCaret++; }
+    const cleanValue = rawBefore.filter(ch => !isDot(ch)).join('');
     const cleanCaret = caret - dotsBeforeCaret;
 
     // 2. Valider la séquence pure
@@ -1924,14 +1917,18 @@ function startTypannotEngine(){
     });
 
     // 4. Insérer un ◌ à CHAQUE position de trou. On insère de DROITE à GAUCHE
-    //    (positions décroissantes) pour ne pas décaler les positions suivantes.
+    //    (positions décroissantes) pour ne pas décaler les positions suivantes. Le caractère
+    //    inséré dépend de la NATURE du manque : DOT_STRUCT (structurel) ou DOT_VALUE (valeur).
     let newValue = cleanValue;
     let newCaret = cleanCaret;
     if(holePositions.length){
       const cleanArr = Array.from(cleanValue);
       const sorted = holePositions.slice().sort((a,b)=>b-a); // décroissant
       sorted.forEach(pos => {
-        cleanArr.splice(pos, 0, DOT);
+        // kind du manque à cette position -> choisit le type de trou
+        const err = allErrs.find(e => e.at === pos && HOLE_KINDS_DOT.includes(e.kind) && !e.abandoned);
+        const dotChar = err ? dotForKind(err.kind) : DOT;
+        cleanArr.splice(pos, 0, dotChar);
         if(cleanCaret >= pos) newCaret++;
       });
       newValue = cleanArr.join('');
@@ -1949,7 +1946,7 @@ function startTypannotEngine(){
       let filteredIdx = 0, hi = 0;
       const sortedHoles = holePositions.slice().sort((a,b)=>a-b); // croissant
       for(let i=0;i<rawArr.length;i++){
-        if(rawArr[i] === DOT){
+        if(isDot(rawArr[i])){
           // ce ◌ correspond au hole sortedHoles[hi]
           const fpos = sortedHoles[hi];
           const err = holeErrs.find(e => e.at === fpos);
@@ -2073,7 +2070,7 @@ function startTypannotEngine(){
       if(!s || !s.typed || s.srcChar<0) return;
       const raw = Array.from(inputEl.value);
       let cnt=0, rp=-1;
-      for(let i=0;i<raw.length;i++){ if(raw[i]===DOT)continue; if(cnt===s.srcChar){rp=i;break;} cnt++; }
+      for(let i=0;i<raw.length;i++){ if(isDot(raw[i]))continue; if(cnt===s.srcChar){rp=i;break;} cnt++; }
       if(rp<0) return;
       raw.splice(rp,1); inputEl.value=raw.join('');
       if(typeof modelRemoveAt==='function'){ modelRemoveAt(s.srcChar); }
@@ -2103,7 +2100,7 @@ function startTypannotEngine(){
     const raw = Array.from(inputEl.value);
     let cnt = 0, rawPos = -1;
     for(let i=0;i<raw.length;i++){
-      if(raw[i] === DOT) continue;
+      if(isDot(raw[i])) continue;
       if(cnt === s.srcChar){ rawPos = i; break; }
       cnt++;
     }
@@ -2126,7 +2123,7 @@ function startTypannotEngine(){
         if(ss && (ss.filled||ss.typed) && ss.glyph === G_REFPOS && ss.srcChar >= 0){
           const raw2 = Array.from(inputEl.value);
           let c2=0, rp2=-1;
-          for(let i=0;i<raw2.length;i++){ if(raw2[i]===DOT)continue; if(c2===ss.srcChar){rp2=i;break;} c2++; }
+          for(let i=0;i<raw2.length;i++){ if(isDot(raw2[i]))continue; if(c2===ss.srcChar){rp2=i;break;} c2++; }
           if(rp2>=0){ raw2.splice(rp2,1); inputEl.value=raw2.join('');
             if(typeof modelRemoveAt==='function'){ modelRemoveAt(ss.srcChar); } }
         }
@@ -2154,7 +2151,7 @@ function startTypannotEngine(){
           const raw = Array.from(inputEl.value);
           let cnt = 0, rawPos = -1;
           for(let i=0;i<raw.length;i++){
-            if(raw[i] === DOT) continue;
+            if(isDot(raw[i])) continue;
             if(cnt === subSt.srcChar){ rawPos = i; break; }
             cnt++;
           }
@@ -2192,7 +2189,7 @@ function startTypannotEngine(){
         const raw = Array.from(inputEl.value);
         let cnt = 0, rawPos = -1;
         for(let i=0;i<raw.length;i++){
-          if(raw[i] === DOT) continue;
+          if(isDot(raw[i])) continue;
           if(cnt === existing.srcChar){ rawPos = i; break; }
           cnt++;
         }
@@ -2261,7 +2258,7 @@ function startTypannotEngine(){
         // ===== MODÈLE : ajouter un rec pour la subvar (le ◌ remplacé n'était pas un rec) =====
         if(typeof modelAdd === 'function'){
           let modelPos = 0;
-          for(let q=0; q<targetDotRaw; q++){ if(raw0[q] !== DOT) modelPos++; }
+          for(let q=0; q<targetDotRaw; q++){ if(!isDot(raw0[q])) modelPos++; }
           const cid = (CASES[clickedCaseIdx] && CASES[clickedCaseIdx].dataOptions) ? CASES[clickedCaseIdx].dataOptions : null;
           modelAdd(glyph, cid, modelPos);
         }
@@ -2332,7 +2329,7 @@ function startTypannotEngine(){
           const raw = Array.from(inputEl.value);
           let cnt = 0, rawPos = -1;
           for(let i=0;i<raw.length;i++){
-            if(raw[i] === DOT) continue;
+            if(isDot(raw[i])) continue;
             if(cnt === victimSrcChar){ rawPos = i; break; }
             cnt++;
           }
@@ -2354,7 +2351,7 @@ function startTypannotEngine(){
           const raw2 = Array.from(inputEl.value);
           let cnt2 = 0, rawPos2 = -1;
           for(let i=0;i<raw2.length;i++){
-            if(raw2[i] === DOT) continue;
+            if(isDot(raw2[i])) continue;
             if(cnt2 === exS.srcChar){ rawPos2 = i; break; }
             cnt2++;
           }
@@ -2383,7 +2380,7 @@ function startTypannotEngine(){
       // positions RAW des caractères non-◌ dans le champ actuel
       const raw = Array.from(inputEl.value);
       const rawPosOfFiltered = []; // filtered idx -> raw idx
-      for(let i=0;i<raw.length;i++){ if(raw[i] !== DOT) rawPosOfFiltered.push(i); }
+      for(let i=0;i<raw.length;i++){ if(!isDot(raw[i])) rawPosOfFiltered.push(i); }
       // pour chaque élément à insérer, trouver sa position filtrée d'insertion
       // (le 1er caractère existant dont la case est APRÈS la case de l'élément)
       const insertions = []; // {rawPos, glyph}
@@ -2409,7 +2406,7 @@ function startTypannotEngine(){
         // position dans le MODÈLE = nb de glyphes non-◌ avant la position d'insertion.
         if(typeof modelAdd === 'function'){
           let modelPos = 0;
-          for(let q = 0; q < ins.rawPos + offset; q++){ if(newVal[q] !== DOT) modelPos++; }
+          for(let q = 0; q < ins.rawPos + offset; q++){ if(!isDot(newVal[q])) modelPos++; }
           const cid = (CASES[ins.caseIdx] && CASES[ins.caseIdx].dataOptions) ? CASES[ins.caseIdx].dataOptions : null;
           modelAdd(ins.glyph, cid, modelPos);
         }
@@ -2430,7 +2427,7 @@ function startTypannotEngine(){
     const raw = Array.from(inputEl.value);
     let rawPos = raw.length, cnt = 0;
     for(let i=0;i<raw.length;i++){
-      if(raw[i] === DOT) continue;
+      if(isDot(raw[i])) continue;
       if(cnt === insertPos){ rawPos = i; break; }
       cnt++;
     }
@@ -2486,7 +2483,7 @@ function startTypannotEngine(){
   // COPIER / COUPER : retirer les ◌ du presse-papier (ce sont des indicateurs, pas du contenu)
   function cleanClipboard(e){
     const sel = inputEl.value.substring(inputEl.selectionStart, inputEl.selectionEnd);
-    const cleaned = sel.split(DOT).join('');
+    const cleaned = Array.from(sel).filter(ch => !isDot(ch)).join('');
     e.clipboardData.setData('text/plain', cleaned);
     e.preventDefault();
   }
@@ -2514,7 +2511,7 @@ function startTypannotEngine(){
   // COPY : le site a un bouton .copy-key. Copier le champ SANS les ◌.
   var _copyKey = document.querySelector('.copy-key');
   if(_copyKey) _copyKey.addEventListener('click', () => {
-    var cleaned = Array.from(inputEl.value).filter(function(c){ return c !== DOT; }).join('');
+    var cleaned = Array.from(inputEl.value).filter(function(c){ return !isDot(c); }).join('');
     if(navigator.clipboard){ navigator.clipboard.writeText(cleaned).catch(function(){}); }
     else {
       // fallback execCommand
@@ -2718,23 +2715,17 @@ function startTypannotEngine(){
   function refreshResolutionHighlight(){
     const ctx = resolutionContext();
     const spans = Array.from(getMirror().querySelectorAll('.mirror-inner > span:not(.blink-caret)'));
-    // reset : chaque ◌ (img SVG) repasse en ROUGE (rouge = manque, pas encore résolution active).
-    spans.forEach(s => {
-      s.classList.remove('ins-caret-blue');
-      const img = s.querySelector('img.ins-caret-svg');
-      if(img){ const f = img.getAttribute('data-form'); if(f && DOT_SVG_URLS[f]) img.src = DOT_SVG_URLS[f].red; }
-    });
+    spans.forEach(s => s.classList.remove('ins-caret-blue'));
     // Déterminer le ◌ ACTIF : celui sous le curseur, sinon le DERNIER créé TEMPORELLEMENT.
     let activeHole = ctx.hole;
     if(!activeHole && lastHoleInfos.length){
+      // dernier créé temporellement (pas le plus à droite spatialement)
       activeHole = lastHoleInfos.find(h => h.target === lastCreatedHoleTarget)
                    || lastHoleInfos[lastHoleInfos.length - 1];
     }
-    // ◌ actif (curseur dessus) -> BLEU : on injecte le SVG bleu de sa forme.
+    // ◌ bleu dans le champ (seulement si curseur dessus)
     if(ctx.hole && spans[ctx.hole.rawPos]){
       spans[ctx.hole.rawPos].classList.add('ins-caret-blue');
-      const img = spans[ctx.hole.rawPos].querySelector('img.ins-caret-svg');
-      if(img){ const f = img.getAttribute('data-form'); if(f && DOT_SVG_URLS[f]) img.src = DOT_SVG_URLS[f].blue; }
     }
     // touches clavier bleues (seulement si curseur sur un ◌)
     const resoSet = new Set(ctx.glyphs);
@@ -2815,7 +2806,7 @@ function startTypannotEngine(){
   let redoStack = [];   // états annulés (pour redo)
   let isUndoRedo = false; // évite d'enregistrer les changements dus à undo/redo
   let histSuspended = false; // suspend l'enregistrement pendant une action multi-caractères
-  function cleanValueOf(v){ return Array.from(v).filter(c => c !== DOT).join(''); }
+  function cleanValueOf(v){ return Array.from(v).filter(c => !isDot(c)).join(''); }
   function snapshotModel(){
     // copie profonde des recs (pour l'undo/redo)
     return (typeof MODEL !== 'undefined') ? MODEL.map(r => ({id:r.id, glyph:r.glyph, caseId:r.caseId})) : [];
@@ -2912,7 +2903,7 @@ function startTypannotEngine(){
     const raw = Array.from(inputEl.value);
     let cnt = 0;
     for(let i=0;i<raw.length;i++){
-      if(raw[i] === DOT) continue;
+      if(isDot(raw[i])) continue;
       if(cnt === fpos) return i;
       cnt++;
     }
@@ -2943,9 +2934,9 @@ function startTypannotEngine(){
     if(!lastResult || !lastResult.st) return;
     // convertir rawIdx en position filtrée
     const raw = Array.from(inputEl.value);
-    if(raw[rawIdx] === DOT) return; // pas de correspondance pour un ◌
+    if(isDot(raw[rawIdx])) return; // pas de correspondance pour un ◌
     let fpos = 0;
-    for(let i=0;i<rawIdx;i++){ if(raw[i] !== DOT) fpos++; }
+    for(let i=0;i<rawIdx;i++){ if(!isDot(raw[i])) fpos++; }
     // hover CHAMP -> violet UNIQUEMENT dans la FORMULE (les cases générées).
     lastResult.st.forEach((st2,i) => {
       if(st2.srcChar === fpos && (st2.filled || st2.typed) && CASES[i].span){
