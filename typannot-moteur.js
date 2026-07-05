@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.30 (SKIP CONTEXTUELS par page: +selection sur body, +sub part+subselection sur lowerface, +selection+sub part+subselection sur upperface. + REGLE CONDITIONNELLE sur lower/upper face: une PART devient skipable SI une SUB PART est posee dans SA PORTEE (isSkippableInContext avec pendingIdx pour compter la case en cours de placement). isDot double injection conservee de v4.29)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.31 (CASCADE GENERIQUE: la qualification directe au clavier d une ancre CASCADABLE (lowerface lips/corner/vermillon, upperface eyeball/eyebrow/eyelids, body shoulder) replique CHAQUE glyphe subvar/value tape dans toutes les cases de la portee qui l acceptent (caseAccepts gere l axe). Glyphe cascade SEUL (pas de couple) - subvar puis value cascadent independamment ; si refpos/zero, apparie pose par case (link). cascadeAnchor suit l ancre en cours. Cascade refpos historique conservee pour ancres non-cascadables. Table CASCADE_ANCHORS par page)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -110,6 +110,17 @@ function startTypannotEngine(){
     body:        ['selection','variable'],
     lowerface:   ['sub part','subselection','variable'],
     upperface:   ['selection','sub part','subselection','variable'],
+  };
+  // ===== CASCADE générique par page : ancres dont la qualification directe (subvar/value au
+  // clavier) se réplique dans TOUTE leur portée. Chaque glyphe tapé se pose dans les cases de la
+  // portée qui l'ACCEPTENT (caseAccepts). Généralise la cascade ref pos : un glyphe (pas un couple)
+  // cascade seul ; si c'est ref pos/zero, l'apparié zero/ref pos suit dans la même case (link).
+  // Valeur = liste de titres d'ancres (matchés sur CASES[].title, insensible casse) qui portent
+  // la cascade sur cette page. =====
+  const CASCADE_ANCHORS = {
+    lowerface:   ['lips','corner','vermillon'],
+    upperface:   ['eyeball','eyebrow','eyelids'],
+    body:        ['shoulder'],
   };
 
   // La hiérarchie (chaîne unique) exposée comme branche unique pour construire les relations
@@ -387,6 +398,44 @@ function startTypannotEngine(){
     }
     return last;
   }
+  // ===== CASCADE GÉNÉRIQUE (helpers module) =====
+  // Value appariée à une subvar (même bloc, juste après). -1 si aucune.
+  function pairedValueOfMod(subIdx){
+    for(let k=subIdx+1;k<CASES.length;k++){
+      if(CASES[k].kind==='value' && isInteractive(CASES[k])) return k;
+      if(CASES[k].kind==='sub variable') return -1;
+      if(isAnchorKind(CASES[k].kind)) return -1;
+    }
+    return -1;
+  }
+  // Subvar appariée à une value (même bloc, juste avant). -1 si aucune.
+  function pairedSubOfMod(valIdx){
+    for(let k=valIdx-1;k>=0;k--){
+      if(CASES[k].kind==='sub variable' && isInteractive(CASES[k])) return k;
+      if(CASES[k].kind==='value') return -1;
+      if(isAnchorKind(CASES[k].kind)) return -1;
+    }
+    return -1;
+  }
+  // TOUTES les cases interactives de la portée d'une ancre (pas juste subvar/value : aussi
+  // selection/subpart/subselection interactives, pour les ancres qui cascadent sur tous niveaux
+  // type eyelids). Règle du caractère incluse via isScopeBoundaryMod.
+  function allCasesUnderAnchorMod(anchorIdx){
+    const cases = [];
+    for(let k=anchorIdx+1;k<CASES.length;k++){
+      if(isScopeBoundaryMod(anchorIdx, k)) break;
+      if(isInteractive(CASES[k])) cases.push(k);
+    }
+    return cases;
+  }
+  // Cette ancre porte-t-elle la cascade générique sur la page courante ? (titre matché)
+  const CASCADE_TITLES = (CASCADE_ANCHORS[PAGE] || []).map(s => s.toLowerCase());
+  function isCascadeAnchor(caseIdx){
+    const c = CASES[caseIdx];
+    if(!c || !isAnchorKind(c.kind)) return false;
+    const t = (c.title || '').toLowerCase();
+    return CASCADE_TITLES.some(name => t.includes(name));
+  }
   // ============================================================================
   // signature d'identité d'un bloc/case = sa chaîne d'ancres (glyphes) + variable au-dessus.
   // Deux cases interactives sont dans des blocs différents si leur signature diffère.
@@ -494,6 +543,7 @@ function startTypannotEngine(){
     const st = CASES.map(c => ({filled:false, glyph:c.fixedGlyph, typed:false, srcChar:-1, isUndef:false}));
     const errors = [];
     let cursor = -1;   // dernière case consommée dans la formule
+    let cascadeAnchor = -1; // ancre cascadable en cours de qualification (-1 = aucune)
 
     // Poser un glyphe dans une case (bloc interactif OU ancre fixe).
     function place(caseIdx, glyph, gi, undef){
@@ -502,6 +552,11 @@ function startTypannotEngine(){
         st[caseIdx].filled = true; st[caseIdx].glyph = glyph; st[caseIdx].srcChar = gi; st[caseIdx].isUndef = !!undef;
       } else {
         st[caseIdx].typed = true; st[caseIdx].srcChar = gi;
+      }
+      // Suivi de l'ancre cascadable en cours : poser une ancre CASCADABLE l'arme ; poser une autre
+      // ancre (non cascadable) désarme la cascade (on a changé de contexte de qualification).
+      if(isAnchorKind(c.kind)){
+        cascadeAnchor = isCascadeAnchor(caseIdx) ? caseIdx : -1;
       }
     }
     // Marquer les ancres obligatoires SAUTÉES entre (from, to) exclus comme trous need_ (celles
@@ -579,11 +634,33 @@ function startTypannotEngine(){
         continue;
       }
 
-      // CASCADE ref pos / zero : poser ref pos (ou zero) juste après une ANCRE (curseur sur une
-      // ancre, quel que soit son niveau) remplit TOUS les blocs {subvar, value} de sa portée avec
-      // les couples ref pos + zero linkés. Portée = règle du caractère (occurrences de même glyphe
-      // traversées). Universel : lit la formule. Ne concerne que le CLAVIER (ref pos lié à zero).
-      if((glyph===G_REFPOS || glyph===G_ZERO) && caseIds[gi]==null){
+      // CASCADE GÉNÉRIQUE : quand on qualifie directement une ancre CASCADABLE (lips, eyeball…),
+      // chaque glyphe subvar/value tapé au clavier se réplique dans TOUTES les cases de la portée
+      // qui l'acceptent (caseAccepts gère l'axe : up ne va que dans les cases updwn). Le glyphe
+      // cascade SEUL ; si c'est ref pos / zero, l'apparié (zero / ref pos) suit dans la même case
+      // (link refpos↔zero par case). cascadeAnchor suit l'ancre cascadable en cours dans la passe.
+      if(caseIds[gi]==null && cascadeAnchor>=0 && (gk==='sub variable' || gk==='value' || gk==='sub part' || gk==='subselection' || gk==='selection' || gk==='part')){
+        const targets = allCasesUnderAnchorMod(cascadeAnchor).filter(k => !st[k].filled && caseAccepts(k, glyph));
+        if(targets.length){
+          let maxK = cursor;
+          targets.forEach(k => {
+            st[k].filled=true; st[k].glyph=glyph; st[k].srcChar=gi; if(k>maxK)maxK=k;
+            // link refpos↔zero par case
+            if(glyph===G_REFPOS && CASES[k].kind==='sub variable'){
+              const vK=pairedValueOfMod(k); if(vK>=0 && !st[vK].filled){ st[vK].filled=true; st[vK].glyph=G_ZERO; st[vK].srcChar=gi; if(vK>maxK)maxK=vK; }
+            } else if(glyph===G_ZERO && CASES[k].kind==='value'){
+              const sK=pairedSubOfMod(k); if(sK>=0 && !st[sK].filled){ st[sK].filled=true; st[sK].glyph=G_REFPOS; st[sK].srcChar=gi; if(sK>maxK)maxK=sK; }
+            }
+          });
+          cursor = Math.max(cursor, maxK);
+          continue;
+        }
+      }
+
+      // CASCADE ref pos / zero (héritée) : poser ref pos/zero juste après une ANCRE non-cascadable
+      // remplit sa portée en couples refpos+zero. Conservée pour les ancres HORS liste cascadable
+      // (comportement historique universel du ref pos sur toutes les pages).
+      if((glyph===G_REFPOS || glyph===G_ZERO) && caseIds[gi]==null && cascadeAnchor<0){
         const lc = cursor>=0 ? CASES[cursor] : null;
         if(lc && isAnchorKind(lc.kind)){
           const blocks = blocksUnderAnchorMod(cursor);
