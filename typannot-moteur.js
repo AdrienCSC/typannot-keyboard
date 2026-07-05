@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.26 (CASCADE ref pos/zero reintegree dans l aligneur: poser ref pos sur une ancre remplit toute sa portee en couples refpos+zero linkes, avec REGLE DU CARACTERE - traverse les occurrences de meme glyphe (lips x4) sans deborder (jaw/tongue). Marche AS=toute la page, part, ancres repetees)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.27 (◌ en SVG: forme selon la nature du manque - ROND structurel (need_part/subpart/selection/subselection) vs CARRE valeur (need_var/subvar/var_or_subvar/value_due). Classe ins-caret-round/-square ajoutee au span du ◌ via son kind dans lastHoleInfos. CSS+4 SVG data-URI dans footer_svg_dot.css. Purement cosmetique, validateur inchange)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -1817,12 +1817,23 @@ function startTypannotEngine(){
         cnt++;
       }
     }
+    // Kinds STRUCTURELS (rond) vs kinds de VALEUR (carré). Le ◌ prend une forme selon la nature
+    // du manque : rond = ancrage/structure manquant, carré = variable/valeur manquante.
+    const HOLE_KIND_STRUCT = ['need_part','need_subpart','need_selection','need_subselection'];
+    const HOLE_KIND_VALUE  = ['need_variable','need_var','need_subvar','need_var_or_subvar','need_value','value_due'];
     raw.forEach((ch, i) => {
       const sp = document.createElement('span');
       sp.textContent = ch;
       sp.setAttribute('data-rawidx', i);
       if(ch === DOT){
-        sp.className = 'ins-caret';        // le ◌ en rouge
+        // forme selon le kind de CE ◌ (retrouvé par sa position brute dans lastHoleInfos).
+        const info = lastHoleInfos.find(h => h.rawPos === i);
+        let shape = '';
+        if(info && info.kind){
+          if(HOLE_KIND_STRUCT.includes(info.kind)) shape = ' ins-caret-round';
+          else if(HOLE_KIND_VALUE.includes(info.kind)) shape = ' ins-caret-square';
+        }
+        sp.className = 'ins-caret' + shape;   // le ◌ (rouge) + forme rond/carré selon le manque
       } else if(wrongRawSet.has(i)){
         sp.className = 'ch-wrong';          // faute en rouge
       } else if(orangeRaw.has(i)){
