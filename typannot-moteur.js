@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.31 (CASCADE GENERIQUE: la qualification directe au clavier d une ancre CASCADABLE (lowerface lips/corner/vermillon, upperface eyeball/eyebrow/eyelids, body shoulder) replique CHAQUE glyphe subvar/value tape dans toutes les cases de la portee qui l acceptent (caseAccepts gere l axe). Glyphe cascade SEUL (pas de couple) - subvar puis value cascadent independamment ; si refpos/zero, apparie pose par case (link). cascadeAnchor suit l ancre en cours. Cascade refpos historique conservee pour ancres non-cascadables. Table CASCADE_ANCHORS par page)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.32 (CASCADE sur SUBPART corrigee: cascader sur une ancre profonde (corner subpart) TRAVERSE les reapparitions d une ancre de niveau superieur (lips) SI le glyphe qui commande la cascade reapparait derriere - corner gauche + lips repete + corner droit = meme cascade. isScopeBoundaryMod: a une frontiere de niveau superieur, on cherche si l ancre cascadee reapparait au meme niveau ; meme glyphe -> traverse, parent different -> vraie frontiere. Cascade generique v4.31 + refpos historique intactes)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -367,11 +367,27 @@ function startTypannotEngine(){
     if(!isAnchorKind(CASES[k].kind)) return false;
     const L = anchorDepthOf(anchorIdx);
     const dk = anchorDepthOf(k);
-    if(dk < L) return true;                        // remonté au-dessus -> frontière
-    if(dk === L){                                  // même niveau : dépend du caractère
+    if(dk < L){
+      // remonté à un niveau supérieur : normalement frontière. MAIS si le glyphe de l'ancre qui
+      // commande la cascade RÉAPPARAÎT derrière (même niveau L, même glyphe), on TRAVERSE : on est
+      // encore dans une répétition de la même sous-structure (ex : corner gauche puis lips répété
+      // puis corner droit -> les deux corners sont la même cascade). S'arrête sur un parent
+      // DIFFÉRENT (glyphe supérieur autre = vraie sortie).
+      const gAnchor = CASES[anchorIdx].fixedGlyph;
+      for(let m=k+1;m<CASES.length;m++){
+        const dm = anchorDepthOf(m);
+        if(!isAnchorKind(CASES[m].kind)) continue;
+        if(dm < dk) break;                 // on remonte encore plus haut -> vraie sortie
+        if(dm === L){
+          return CASES[m].fixedGlyph !== gAnchor; // même glyphe -> traverse ; autre -> frontière
+        }
+      }
+      return true;                          // pas de réapparition -> frontière
+    }
+    if(dk === L){                           // même niveau : dépend du caractère
       return CASES[k].fixedGlyph !== CASES[anchorIdx].fixedGlyph; // glyphe diff -> frontière
     }
-    return false;                                  // plus bas -> dans la sous-arborescence
+    return false;                           // plus bas -> dans la sous-arborescence
   }
   // Les blocs {sub, val} de la portée d'une ancre (règle du caractère incluse).
   function blocksUnderAnchorMod(anchorIdx){
