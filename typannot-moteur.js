@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.27 (◌ en SVG: forme selon la nature du manque - ROND structurel (need_part/subpart/selection/subselection) vs CARRE valeur (need_var/subvar/var_or_subvar/value_due). Classe ins-caret-round/-square ajoutee au span du ◌ via son kind dans lastHoleInfos. CSS+4 SVG data-URI dans footer_svg_dot.css. Purement cosmetique, validateur inchange)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.28 (◌ en SVG via IMG injecte: le ◌ est rendu comme un <img> SVG dans le mirror (rond=structurel need_part/subpart/selection/subselection, carre=valeur need_var/subvar/var_or_subvar/value_due). Couleur par le src: rouge=manque, bleu=◌ actif de resolution (bascule dans refreshResolutionHighlight). Le caractere ◌ reste dans inputEl.value, seul le rendu change. Plus de background moche)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -16,6 +16,7 @@
    Conserve tout le comportement finger (v3.6) à l'identique.
    Debug console : window.typannotJournal()
    ============================================================ */
+
 
 /* ====================================================================
    MOTEUR STATELESS v6 — proto finger
@@ -1560,6 +1561,14 @@ function startTypannotEngine(){
 
   // ---------- DÉCOUPER la valeur de l'input en glyphs ----------
   const DOT = '◌'; // caractère "il manque un élément" (vrai char dans l'input)
+  // URLs des SVG du ◌ : forme (round=structurel / square=valeur) × couleur (red=manque /
+  // blue=résolution active). Le rendu injecte un <img> et choisit rouge/bleu selon l'état.
+  const DOT_SVG_URLS = {
+    round: { red:  'https://cdn.prod.website-files.com/6a4872338398df20e02f9834/6a4a77ac70325ae14aca4600_round-dots_red.svg',
+             blue: 'https://cdn.prod.website-files.com/6a4872338398df20e02f9834/6a4a77acf238973d23467c90_round-dots_blue.svg' },
+    square:{ red:  'https://cdn.prod.website-files.com/6a4872338398df20e02f9834/6a4a77ac65c0cac5cff9a5ca_square-dots_red.svg',
+             blue: 'https://cdn.prod.website-files.com/6a4872338398df20e02f9834/6a4a77ac2a6dee9e17e6f0f8_square-dots_blue.svg' }
+  };
   function toGlyphs(str){
     // la validation IGNORE les ◌ (ce ne sont pas de vrais glyphes)
     return Array.from(str).filter(ch => ch !== DOT);
@@ -1816,27 +1825,37 @@ function startTypannotEngine(){
         cnt++;
       }
     }
-    // Kinds STRUCTURELS (rond) vs kinds de VALEUR (carré). Le ◌ prend une forme selon la nature
-    // du manque : rond = ancrage/structure manquant, carré = variable/valeur manquante.
     const HOLE_KIND_STRUCT = ['need_part','need_subpart','need_selection','need_subselection'];
     const HOLE_KIND_VALUE  = ['need_variable','need_var','need_subvar','need_var_or_subvar','need_value','value_due'];
     raw.forEach((ch, i) => {
       const sp = document.createElement('span');
-      sp.textContent = ch;
       sp.setAttribute('data-rawidx', i);
       if(ch === DOT){
         // forme selon le kind de CE ◌ (retrouvé par sa position brute dans lastHoleInfos).
         const info = lastHoleInfos.find(h => h.rawPos === i);
-        let shape = '';
+        let form = null;
         if(info && info.kind){
-          if(HOLE_KIND_STRUCT.includes(info.kind)) shape = ' ins-caret-round';
-          else if(HOLE_KIND_VALUE.includes(info.kind)) shape = ' ins-caret-square';
+          if(HOLE_KIND_STRUCT.includes(info.kind)) form = 'round';
+          else if(HOLE_KIND_VALUE.includes(info.kind)) form = 'square';
         }
-        sp.className = 'ins-caret' + shape;   // le ◌ (rouge) + forme rond/carré selon le manque
-      } else if(wrongRawSet.has(i)){
-        sp.className = 'ch-wrong';          // faute en rouge
-      } else if(orangeRaw.has(i)){
-        sp.className = 'ch-impact';         // impacté en orange
+        sp.className = 'ins-caret';
+        if(form){
+          const img = document.createElement('img');
+          img.className = 'ins-caret-svg';
+          img.setAttribute('data-form', form);
+          img.src = DOT_SVG_URLS[form].red;   // rouge par défaut ; passe en bleu si ◌ actif (résolution)
+          img.alt = '';
+          sp.appendChild(img);
+        } else {
+          sp.textContent = ch;   // fallback : ◌ texte si kind inconnu
+        }
+      } else {
+        sp.textContent = ch;
+        if(wrongRawSet.has(i)){
+          sp.className = 'ch-wrong';          // faute en rouge
+        } else if(orangeRaw.has(i)){
+          sp.className = 'ch-impact';         // impacté en orange
+        }
       }
       inner.appendChild(sp);
     });
@@ -2699,17 +2718,23 @@ function startTypannotEngine(){
   function refreshResolutionHighlight(){
     const ctx = resolutionContext();
     const spans = Array.from(getMirror().querySelectorAll('.mirror-inner > span:not(.blink-caret)'));
-    spans.forEach(s => s.classList.remove('ins-caret-blue'));
+    // reset : chaque ◌ (img SVG) repasse en ROUGE (rouge = manque, pas encore résolution active).
+    spans.forEach(s => {
+      s.classList.remove('ins-caret-blue');
+      const img = s.querySelector('img.ins-caret-svg');
+      if(img){ const f = img.getAttribute('data-form'); if(f && DOT_SVG_URLS[f]) img.src = DOT_SVG_URLS[f].red; }
+    });
     // Déterminer le ◌ ACTIF : celui sous le curseur, sinon le DERNIER créé TEMPORELLEMENT.
     let activeHole = ctx.hole;
     if(!activeHole && lastHoleInfos.length){
-      // dernier créé temporellement (pas le plus à droite spatialement)
       activeHole = lastHoleInfos.find(h => h.target === lastCreatedHoleTarget)
                    || lastHoleInfos[lastHoleInfos.length - 1];
     }
-    // ◌ bleu dans le champ (seulement si curseur dessus)
+    // ◌ actif (curseur dessus) -> BLEU : on injecte le SVG bleu de sa forme.
     if(ctx.hole && spans[ctx.hole.rawPos]){
       spans[ctx.hole.rawPos].classList.add('ins-caret-blue');
+      const img = spans[ctx.hole.rawPos].querySelector('img.ins-caret-svg');
+      if(img){ const f = img.getAttribute('data-form'); if(f && DOT_SVG_URLS[f]) img.src = DOT_SVG_URLS[f].blue; }
     }
     // touches clavier bleues (seulement si curseur sur un ◌)
     const resoSet = new Set(ctx.glyphs);
