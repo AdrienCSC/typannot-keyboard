@@ -1,5 +1,5 @@
 /* ============================================================
-   TYPANNOT — MOTEUR MULTI-PAGES — v4.29 (prepare le double glyphe ◌: DOUBLE INJECTION - DOT_STRUCT (parts/ancrage) vs DOT_VALUE (var/subvar/value), MEME caractere ◌ pour l instant (rendu identique v4.26). isDot() reconnait les deux partout, dotForKind() choisit lequel inserer, classe ins-caret-struct/-value posee selon la nature. Quand la police aura 2 glyphes: remplacer juste les 2 constantes)
+   TYPANNOT — MOTEUR MULTI-PAGES — v4.30 (SKIP CONTEXTUELS par page: +selection sur body, +sub part+subselection sur lowerface, +selection+sub part+subselection sur upperface. + REGLE CONDITIONNELLE sur lower/upper face: une PART devient skipable SI une SUB PART est posee dans SA PORTEE (isSkippableInContext avec pendingIdx pour compter la case en cours de placement). isDot double injection conservee de v4.29)
    Hébergé en externe (jsDelivr / GitHub).
    Un seul moteur pour les 5 pages (finger, upper limb, lowerface,
    body, upperface). Démarre sur 'groups-ready'.
@@ -107,9 +107,9 @@ function startTypannotEngine(){
   const ANCHOR_SKIPPABLE = {
     finger:      ['selection','variable'],
     'upper-limb':['selection','variable'],
-    body:        ['variable'],
-    lowerface:   ['variable'],
-    upperface:   ['variable'],
+    body:        ['selection','variable'],
+    lowerface:   ['sub part','subselection','variable'],
+    upperface:   ['selection','sub part','subselection','variable'],
   };
 
   // La hiérarchie (chaîne unique) exposée comme branche unique pour construire les relations
@@ -135,6 +135,32 @@ function startTypannotEngine(){
   // niveaux skipables de la page courante (Table 3)
   const SKIP_SET = new Set(ANCHOR_SKIPPABLE[PAGE] || []);
   function isSkippableKind(kind){ return SKIP_SET.has(kind); }
+  // Skipabilité CONTEXTUELLE. Étend isSkippableKind avec une règle conditionnelle :
+  // sur lowerface & upperface, une PART devient skipable SI une SUB PART est posée dans SA
+  // PORTÉE (la sub part suffit à ancrer, la part au-dessus n'est plus obligatoire). Ailleurs,
+  // se rabat sur la skipabilité statique. caseIdx = l'index de l'ancre testée ; st = état courant.
+  const PART_SKIP_IF_SUBPART = (PAGE === 'lowerface' || PAGE === 'upperface');
+  function subPartPosedInScope(partIdx, st, pendingIdx){
+    // une sub part est-elle posée (typed/filled) dans la portée de la part partIdx ? On compte
+    // aussi pendingIdx = la case qu'on est EN TRAIN de placer (pas encore dans st) si c'est une
+    // sub part de cette portée -> évite le cercle "subpart refusée car part manque, part obligatoire
+    // car subpart pas posée".
+    const end = scopeEndOf(partIdx);
+    if(pendingIdx!=null && pendingIdx>partIdx && pendingIdx<end && CASES[pendingIdx] && CASES[pendingIdx].kind==='sub part') return true;
+    for(let k=partIdx+1;k<end;k++){
+      if(CASES[k].kind==='sub part'){
+        if((st[k] && (st[k].typed || st[k].filled)) || anchorSatisfiedInSt(k, st)) return true;
+      }
+    }
+    return false;
+  }
+  function isSkippableInContext(kind, caseIdx, st, pendingIdx){
+    if(isSkippableKind(kind)) return true;                 // skipable statique -> toujours
+    if(PART_SKIP_IF_SUBPART && kind==='part' && caseIdx!=null && st){
+      return subPartPosedInScope(caseIdx, st, pendingIdx); // part skipable SSI sub part dans sa portée
+    }
+    return false;
+  }
 
   // Relations parent->enfant autorisées, extraites des branches R01c de la page. Un même kind
   // peut avoir des parents différents selon la branche (upperface : selection est enfant de part
@@ -453,7 +479,9 @@ function startTypannotEngine(){
       if(a.kind === 'as') continue;
       if(a.caseIdx === caseIdx) continue;         // elle-même
       if(!isAnchorKind(a.kind)) continue;
-      if(isSkippableKind(a.kind)) continue;       // skipable -> non obligatoire
+      // caseIdx = la case cible en cours de placement -> pendingIdx (compte comme sub part posée
+      // pour la règle part-skipable-si-subpart, même si pas encore dans st).
+      if(isSkippableInContext(a.kind, a.caseIdx, st, caseIdx)) continue; // skipable (statique ou contextuel)
       if(!anchorSatisfiedInSt(a.caseIdx, st)) return {caseIdx:a.caseIdx, kind:a.kind};
     }
     return null;
@@ -482,7 +510,7 @@ function startTypannotEngine(){
       for(let k=fromCursor+1;k<toCase;k++){
         const c = CASES[k];
         if(!isAnchorKind(c.kind) || c.kind==='as') continue;
-        if(isSkippableKind(c.kind)) continue;
+        if(isSkippableInContext(c.kind, k, st, toCase)) continue; // toCase = cible en cours -> pendingIdx
         if(st[k].typed || st[k].filled) continue;
         // RÈGLE DU CARACTÈRE : si le glyphe de cette ancre est déjà posé ailleurs, elle est
         // satisfaite -> ne pas la réclamer.
@@ -949,7 +977,7 @@ function startTypannotEngine(){
           if(link.kind === 'as') continue;               // AS = racine, jamais un manque
           if(!isAnchorKind(link.kind)) continue;
           if(link.caseIdx === j) continue;               // j lui-même n'est pas son propre parent
-          if(isSkippableKind(link.kind)) continue;        // niveau SKIPABLE : jamais réclamé
+          if(isSkippableInContext(link.kind, link.caseIdx, st)) continue; // niveau SKIPABLE (statique ou contextuel) : jamais réclamé
           if(!anchorPosed(link.caseIdx)){
             return { kind: needKindOf(link.kind), caseIdx: link.caseIdx };
           }
